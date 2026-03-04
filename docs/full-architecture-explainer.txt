@@ -1,0 +1,740 @@
+================================================================================
+c3l-NextLevelInsights (NLI) — FULL ARCHITECTURE EXPLAINER
+================================================================================
+Account : 184898280326
+Region  : ap-southeast-2
+Profile : c3l-analytics
+Updated : 2026-03-04
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+FIX APPLIED: WHOOP CONFIG ERROR
+────────────────────────────────────────────────────────────────────────────────
+
+Root cause:
+  backend/server.js called require('dotenv').config() with no path argument.
+  When Node starts from the backend/ directory, dotenv searches for .env in
+  that same folder — but the real .env lives one level up at the project root.
+
+Fix applied to backend/server.js line 1:
+  BEFORE: require('dotenv').config();
+  AFTER : require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+
+Your .env values (project root) — already correct:
+  WHOOP_CLIENT_ID     = 49ecc980-0ae3-454e-8f94-9e029c578769
+  WHOOP_CLIENT_SECRET = 15d39eb2d4de8cf150793b8bf0de3fcfbd54e0dd8c35c9db692bb7740df79e12
+  WHOOP_REDIRECT_URI  = http://localhost:3001/api/auth/whoop/callback
+
+After the fix: restart the backend with either:
+  node backend/server.js          (from project root)
+  node server.js                  (from inside backend/)
+
+
+================================================================================
+SECTION 1 — SYSTEM OVERVIEW
+================================================================================
+
+                ┌─────────────────────────────────────────────────────┐
+                │         Vue.js Frontend  (localhost:5173)            │
+                │  ConnectedServices.vue  │  AdminDashboard.vue        │
+                │  DataPermissions.vue    │  useAuth.js composable     │
+                └──────────────────────────────┬──────────────────────┘
+                                               │ HTTP
+                             ┌─────────────────▼──────────────────┐
+                             │   Express Backend  (localhost:3001)  │
+                             │         backend/server.js            │
+                             └──┬──────────┬──────────┬────────────┘
+                                │          │          │
+                           Whoop API    AWS S3    AWS DynamoDB
+
+
+================================================================================
+SECTION 2 — AMAZON COGNITO  (Authentication & Identity)
+================================================================================
+
+User Pool Name : c3l-NextLevelInsights
+Pool ID        : ap-southeast-2_7lxzyRc1Z
+Pool ARN       : arn:aws:cognito-idp:ap-southeast-2:184898280326:userpool/ap-southeast-2_7lxzyRc1Z
+App Client     : c3l-nli-app-client
+Client ID      : 1tcq0o4uue5dp9ge603d7lsjqu
+Sign-in method : Email + Password
+Email verified : Auto-verified
+
+GROUPS (visible in Cognito Console)
+--------------------------------------
+Group      | IAM Role              | Who             | Capabilities
+-----------|-----------------------|-----------------|----------------------------------
+students   | NextLevelStudentRole  | Regular users   | Connect wearables, share data,
+           |                       |                 | manage consent, view My Data
+admin      | NextLevelAdminRole    | Teachers /      | View Admin Dashboard with
+           |                       | researchers     | consented students' analytics
+
+JWT TOKEN (returned by Cognito after login)
+-------------------------------------------
+{
+  "sub":              "<uuid — unique user identifier>",
+  "cognito:groups":   ["students"],     // OR ["admin"]
+  "email":            "alice@uni.edu",
+  "custom:role":      "student"
+}
+
+The "sub" claim is the PRIMARY KEY used everywhere:
+  - DynamoDB partition keys (STUDENT#<sub>, ADMIN#<sub>)
+  - S3 file paths  (<userId>_recovery.json)
+  - Athena WHERE clause  (owner_id = '<sub>')
+
+FRONTEND ROLE MAPPING (src/composables/useAuth.js)
+---------------------------------------------------
+After login the composable persists to localStorage:
+  localStorage.nli_role  = "admin" | "student"
+  localStorage.nli_email = "..."
+  localStorage.nli_sub   = "<cognito sub uuid>"
+
+Computed helpers:
+  isAdmin   -> true when role === 'admin'
+  isStudent -> true when role === 'student'
+  isLoggedIn-> true when role is any non-null value
+
+Router guard (src/router/index.js):
+  beforeEach() checks isAdmin before allowing /admin/dashboard
+  Non-admin users are redirected to /connected-services
+
+
+================================================================================
+SECTION 3 — WHOOP INTEGRATION (Full OAuth + Data Pipeline)
+================================================================================
+
+STEP-BY-STEP FLOW
+-----------------
+
+1. User clicks "Connect" on ConnectedServices.vue
+   -> window.location.href = 'http://localhost:3001/api/auth/whoop'
+
+2. GET /api/auth/whoop  (backend/server.js)
+   -> Reads WHOOP_CLIENT_ID + WHOOP_REDIRECT_URI from .env
+   -> Redirects browser to Whoop authorization page:
+      https://api.prod.whoop.com/oauth/oauth2/auth
+      ?client_id=<id>
+      &redirect_uri=http://localhost:3001/api/auth/whoop/callback
+      &response_type=code
+      &scope=offline read:recovery read:cycles read:sleep
+             read:workout read:profile read:body_measurement
+
+3. User approves in Whoop's browser popup
+   -> Whoop redirects back with ?code=xxx
+
+4. GET /api/auth/whoop/callback?code=xxx  (backend/server.js)
+   a) Exchange code for tokens:
+      POST https://api.prod.whoop.com/oauth/oauth2/token
+      grant_type=authorization_code, code, client_id, client_secret, redirect_uri
+      -> returns: access_token, refresh_token, expires_in
+
+   b) Fetch 6 data types in parallel (last 30 days):
+      - Profile    https://api.prod.whoop.com/developer/v1/user/profile/basic
+      - Body       https://api.prod.whoop.com/developer/v1/user/measurement/body
+      - Recovery   https://api.prod.whoop.com/developer/v2/recovery?start=&end=&limit=25
+      - Cycles     https://api.prod.whoop.com/developer/v2/cycle?...
+      - Sleep      https://api.prod.whoop.com/developer/v2/activity/sleep?...
+      - Workout    https://api.prod.whoop.com/developer/v2/activity/workout?...
+
+   c) Save full session bundle locally:
+      backend/data/whoop/user_data/<timestamp>_whoop_data.json
+
+   d) Upload 6 separate files to S3 (see Section 4)
+
+   e) Write sync log to DynamoDB DataSyncLogs table
+
+   f) Redirect -> http://localhost:5173/connected-services?status=connected&service=whoop
+
+5. ConnectedServices.vue detects ?status=connected
+   -> service.connected = true  (green "Connected" badge)
+   -> Saves to localStorage so badge persists on refresh
+
+REFRESH FLOW (POST /api/whoop/refresh)
+---------------------------------------
+1. Reads latest local JSON file to extract refresh_token
+2. POSTs to Whoop token endpoint with grant_type=refresh_token
+3. Re-fetches all 6 data types with new access_token
+4. Saves new file (overwrites with new refresh token too)
+
+
+================================================================================
+SECTION 4 — AMAZON S3  (Data Lake Storage)
+================================================================================
+
+Bucket: c3l-nextlevelinsights-data-lake
+
+RAW DATA PATHS (written by backend/server.js after each Whoop OAuth)
+----------------------------------------------------------------------
+raw/whoop/recovery/2026/03/04/<userId>_recovery.json
+raw/whoop/sleep/2026/03/04/<userId>_sleep.json
+raw/whoop/cycles/2026/03/04/<userId>_cycles.json
+raw/whoop/workout/2026/03/04/<userId>_workout.json
+raw/whoop/profile/2026/03/04/<userId>_profile.json
+raw/whoop/body_measurement/2026/03/04/<userId>_body_measurement.json
+
+Each file contains:
+  {
+    "meta":         { "user_id": "...", "synced_at": "...", "source": "whoop-api-v2" },
+    "user_profile": { ... },
+    "records":      [ ... ]    <- actual Whoop API response records
+  }
+
+PLANNED PATHS (written by Lambda pipeline)
+-------------------------------------------
+raw/domain=health/device_type=whoop/year=2026/month=03/day=04/<id>.json
+processed/domain=health/product=health_metrics/year=.../... (.parquet files)
+processed/domain=academic/product=academic_engagement/year=.../...
+athena-results/    <- temporary Athena query output
+
+
+================================================================================
+SECTION 5 — AWS GLUE  (Data Catalog & Crawlers)
+================================================================================
+
+Glue Database : c3l_nli_raw_devices
+
+Glue crawlers scan the S3 prefixes and automatically infer schemas,
+creating table definitions that Athena can query with SQL.
+
+TABLE               | S3 PREFIX SCANNED                    | USED FOR
+--------------------|--------------------------------------|-------------------
+whoop_recovery_     | raw/whoop/recovery/                  | AdminDashboard
+recovery            |                                      | Athena queries
+whoop_sleep_sleep   | raw/whoop/sleep/                     | AdminDashboard
+whoop_cycles_cycles | raw/whoop/cycles/                    | Analytics
+whoop_workout_      | raw/whoop/workout/                   | Analytics
+workout             |                                      |
+whoop_profile_      | raw/whoop/profile/                   | Profile lookups
+profile             |                                      |
+whoop_body_         | raw/whoop/body_measurement/          | Analytics
+measurement_*       |                                      |
+
+Crawlers (pre-existing):
+  c3l-nli-whoop-recovery-crawler
+  c3l-nli-whoop-sleep-crawler
+  c3l-nli-whoop-cycles-crawler
+  c3l-nli-whoop-workout-crawler
+  c3l-nli-whoop-profile-crawler
+  c3l-nli-whoop-body_measurement-crawler
+
+Crawlers are triggered by Lambda c3l-nli-UpdateGluePartition inside
+the Step Function consent pipeline.
+
+
+================================================================================
+SECTION 6 — AMAZON DATAZONE  (Data Governance & Catalog)
+================================================================================
+
+Domain ID  : dzd-cv79bbxiotkqsi
+Project ID : 62guenc68nuvxe
+DataSource : bpr42x2umdut9e
+Portal     : https://dzd-cv79bbxiotkqsi.datazone.ap-southeast-2.on.aws/
+
+Purpose: Governance and discovery catalog ONLY — not used for serving data.
+
+After each Glue crawler run, Lambda c3l-nli-UpdateDataZoneAsset triggers
+a DataZone data source sync:
+  Glue table "whoop_recovery_recovery"
+    -> appears in DataZone as a discoverable asset
+    -> linked to Data Product "c3l-nli_whoop_dev_raw_recovery"
+    -> governance metadata, lineage, and ownership tracked here
+
+Existing Data Products (Whoop x6):
+  c3l-nli_whoop_dev_raw_recovery
+  c3l-nli_whoop_dev_raw_sleep
+  c3l-nli_whoop_dev_raw_cycles
+  c3l-nli_whoop_dev_raw_workout
+  c3l-nli_whoop_dev_raw_profile
+  c3l-nli_whoop_dev_raw_body_measurement
+
+Actual runtime queries still go through Athena (not DataZone).
+
+
+================================================================================
+SECTION 7 — AWS LAMBDA FUNCTIONS
+================================================================================
+
+All Lambdas use execution role: c3l-nli-LambdaExecutionRole
+IAM Policies attached:
+  - AWSLambdaBasicExecutionRole
+  - AmazonDynamoDBFullAccess
+  - AmazonS3FullAccess
+  - AWSGlueConsoleFullAccess
+  - AWSLakeFormationCrossAccountManager
+  - AmazonDataZoneFullAccess
+
+FUNCTION                          | TRIGGER          | PURPOSE
+----------------------------------|------------------|--------------------------------
+c3l-nli-ValidateJWT               | Step Function    | Verify Cognito JWT, extract
+                                  |                  | student_sub + cognito:groups
+c3l-nli-StoreConsent              | Step Function    | Write consent to nextlevel-consent
+c3l-nli-StoreConsentV2            | Step Function    | Per-admin consent (V2 schema)
+c3l-nli-IngestHealth              | Step Fn Map      | Pull Whoop/Fitbit -> S3 raw/
+c3l-nli-NormalizeHealth           | Step Fn Map      | Canonical schema -> S3 processed/
+c3l-nli-IngestAcademic            | Step Fn Map      | Pull Canvas/Moodle -> S3 raw/
+c3l-nli-NormalizeAcademic         | Step Fn Map      | Canonical schema -> S3 processed/
+c3l-nli-UpdateGluePartition       | Step Fn Map      | Start Glue crawler, auto-create
+                                  |                  | crawler if missing
+c3l-nli-UpdateDataZoneAsset       | Step Fn Map      | Trigger DataZone data source sync
+c3l-nli-UpdateLakeFormationFilter | Step Fn Map      | Upsert LF row filter per student
+c3l-nli-AdminDashboard [DEPLOYED] | HTTP GET         | JWT verify -> DynamoDB GSI ->
+                                  |                  | Athena filtered query -> JSON
+
+c3l-nli-AdminDashboard Detail (DEPLOYED 2026-03-04):
+------------------------------------------------------
+ARN     : arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-AdminDashboard
+Runtime : Node.js 20.x  |  Memory: 512 MB  |  Timeout: 120 s
+
+Environment Variables:
+  CONSENT_V2_TABLE     = nextlevel-consent
+  ATHENA_DATABASE      = c3l_nli_raw_devices
+  ATHENA_OUTPUT_BUCKET = s3://c3l-nextlevelinsights-data-lake/athena-results/
+  COGNITO_USER_POOL_ID = ap-southeast-2_7lxzyRc1Z
+  COGNITO_CLIENT_ID    = 1tcq0o4uue5dp9ge603d7lsjqu
+
+How it works:
+  1. Verify Cognito JWT (aws-jwt-verify) -> must be from 7lxzyRc1Z pool
+  2. Check cognito:groups includes "admin" -> else return 403
+  3. Extract admin_sub from JWT claims
+  4. DynamoDB GSI1 query: GSI1PK = "ADMIN#<admin_sub>"
+     -> Returns list of STUDENT#<sub> records (consented students)
+  5. Build Athena SQL with WHERE owner_id IN (<student_subs>)
+  6. Return JSON rows -> AdminDashboard.vue renders results
+
+
+================================================================================
+SECTION 8 — AWS STEP FUNCTIONS  (Consent Pipeline Orchestration)
+================================================================================
+
+State Machine: c3l-nli-ConsentShareStateMachine
+File: infrastructure/stepfunction/c3l-nli-ConsentShareStateMachine.json
+Execution Role: c3l-nli-StepFunctionExecutionRole
+
+Triggered when a student clicks "Share Data" in the frontend:
+
+POST /consent  (with Cognito JWT in Authorization header)
+  |
+  v
+Step Function starts
+  |
+  +-- 1. c3l-nli-ValidateJWT
+  |       Verify JWT from pool ap-southeast-2_7lxzyRc1Z
+  |       Extract student_sub + confirm cognito:groups = "students"
+  |
+  +-- 2. c3l-nli-StoreConsent
+  |       DynamoDB write:
+  |       PK = STUDENT#<sub>
+  |       SK = ADMIN#<admin_sub>#RESOURCE#health#whoop
+  |
+  +-- 3. [Map over each device / domain]
+          |
+          +-- c3l-nli-IngestHealth
+          |     Pull raw Whoop/Fitbit JSON -> S3 raw/domain=health/
+          |
+          +-- c3l-nli-NormalizeHealth
+          |     Transform to canonical 6-field schema
+          |     -> S3 processed/domain=health/product=health_metrics/
+          |
+          +-- c3l-nli-UpdateGluePartition
+          |     Start Glue crawler
+          |     Auto-creates table in c3l_nli_raw_devices DB
+          |
+          +-- c3l-nli-UpdateDataZoneAsset
+          |     Trigger DataZone sync (domain dzd-cv79bbxiotkqsi)
+          |     -> Glue table visible in DataZone catalog
+          |
+          +-- c3l-nli-UpdateLakeFormationFilter
+                Build LF row filter: student_id IN ('s1','s2',...)
+                Upsert filter on Glue table for NextLevelAdminRole
+
+
+================================================================================
+SECTION 9 — AWS LAKE FORMATION  (Row-Level Security)
+================================================================================
+
+Lake Formation sits between Glue/S3 and Athena.
+It enforces column and row-level access control.
+
+LF-Tags defined:
+  domain      : health | academic | performance | raw | system
+  sensitivity : restricted | internal | public
+  tier        : raw | processed | export
+
+Row Filters (auto-created by Lambda at runtime):
+  c3l-nli-staff-filter-health-*   -> filter: owner_id IN (<student_list>)
+  c3l-nli-staff-filter-academic-* -> filter: owner_id IN (<student_list>)
+
+Important: NextLevelAdminRole is ONLY granted access to rows where
+owner_id matches students who consented to that specific admin.
+Even if two admins run the same Athena query, they get different
+result sets — each sees only their own consented students.
+
+IAM Role Grants:
+  c3l-engageai-glue-crawler-anl -> DB CREATE_TABLE + ALL (pre-existing)
+  NextLevelAdminRole            -> filtered view via row filters
+
+
+================================================================================
+SECTION 10 — DYNAMODB TABLES
+================================================================================
+
+TABLE                                    | PURPOSE                      | KEY DESIGN
+-----------------------------------------|------------------------------|------------------
+c3l-NextLevelInsights-DataSyncLogs       | Whoop sync audit log         | PK: sync_id (UUID)
+                                         |                              | SK: timestamp
+c3l-NextLevelInsights-                   | Device sharing on/off        | PK: user_id
+UserDevicePermissions                    | per user                     | SK: device_type
+c3l-NextLevelInsights-health-data        | Health data store            | PK: USER#<sub>
+                                         |                              | SK: <timestamp>
+c3l-NextLevelInsights-users              | User profile store           | PK: USER#<sub>
+nextlevel-consent                        | Per-admin consent mapping    | PK: STUDENT#<sub>
+                                         |                              | SK: ADMIN#<sub>
+                                         |                              |  #RESOURCE#<dom>#<dev>
+
+nextlevel-consent GSI (domain-device-index):
+  HASH  : domain
+  RANGE : device_type
+  Projects: student_id, status, consent_metrics, consented_at, expires_at
+
+Example consent record:
+  {
+    "PK":           "STUDENT#uuid-student",
+    "SK":           "ADMIN#uuid-admin#RESOURCE#health#whoop",
+    "domain":       "health",
+    "device_type":  "whoop",
+    "status":       "active",
+    "consented_at": "2026-03-04T00:00:00Z"
+  }
+
+
+================================================================================
+SECTION 11 — ADMIN LOGIN → DATA DISPLAY (End-to-End)
+================================================================================
+
+1. Admin navigates to /admin/dashboard
+   -> useAuth.js reads localStorage.nli_role === 'admin'
+   -> isAdmin computed = true
+   -> Router guard (beforeEach) allows access
+
+2. AdminDashboard.vue renders
+   -> Shows AWS services strip: Cognito -> DynamoDB -> Lambda -> Athena -> DataZone
+   -> Makes GET /dashboard with Authorization: Bearer <Cognito JWT>
+
+3. c3l-nli-AdminDashboard Lambda receives request
+   a. aws-jwt-verify validates JWT against pool ap-southeast-2_7lxzyRc1Z
+   b. Checks cognito:groups includes "admin" -> else 403 Forbidden
+   c. Extracts admin_sub from JWT sub claim
+
+4. DynamoDB GSI1 query:
+   GSI1PK = "ADMIN#<admin_sub>"
+   -> Returns all STUDENT#<sub> records where this admin has consent
+   -> Builds list of student_subs
+
+5. Athena SQL (scoped to this admin's students only):
+   SELECT owner_id,
+          AVG(sleep_score)    AS avg_sleep,
+          AVG(recovery_score) AS avg_recovery,
+          COUNT(*)            AS records
+   FROM   processed_health_metrics
+   WHERE  owner_id IN ('<student1>', '<student2>', ...)
+     AND  date >= date('2026-01-01')
+   GROUP BY owner_id;
+
+6. Lambda returns JSON -> AdminDashboard.vue displays:
+   - Stat cards: Students Sharing, Avg Sleep, Avg Recovery, Datasets
+   - Student list: name, sub ID, health/academic badges, status
+   - Analytics table: per-student sleep & recovery bars + trend arrows
+   - Architecture steps panel explaining the full flow
+
+
+================================================================================
+SECTION 12 — COMPLETE AWS SERVICE INDEX
+================================================================================
+
+SERVICE                 | RESOURCE NAME                              | ROLE
+------------------------|--------------------------------------------|--------------------------
+Amazon Cognito          | c3l-NextLevelInsights                      | User auth, JWT, groups
+                        | Pool: ap-southeast-2_7lxzyRc1Z            |
+                        | Client: 1tcq0o4uue5dp9ge603d7lsjqu        |
+Amazon S3               | c3l-nextlevelinsights-data-lake            | Raw + processed data lake
+Amazon DynamoDB         | c3l-NextLevelInsights-DataSyncLogs         | Whoop sync audit log
+Amazon DynamoDB         | c3l-NextLevelInsights-UserDevicePermissions| Device sharing toggles
+Amazon DynamoDB         | nextlevel-consent                          | Per-admin consent (GSI)
+Amazon DynamoDB         | c3l-NextLevelInsights-users                | User profiles
+Amazon DynamoDB         | c3l-NextLevelInsights-health-data          | Health data store
+AWS Lambda              | c3l-nli-AdminDashboard [DEPLOYED]          | Dashboard API
+AWS Lambda              | c3l-nli-ValidateJWT                        | JWT verification
+AWS Lambda              | c3l-nli-StoreConsent / StoreConsentV2      | Write consent to DynamoDB
+AWS Lambda              | c3l-nli-IngestHealth / IngestAcademic      | Pull raw data -> S3
+AWS Lambda              | c3l-nli-NormalizeHealth / NormalizeAcademic| Transform to schema
+AWS Lambda              | c3l-nli-UpdateGluePartition                | Trigger Glue crawlers
+AWS Lambda              | c3l-nli-UpdateDataZoneAsset                | Trigger DataZone sync
+AWS Lambda              | c3l-nli-UpdateLakeFormationFilter          | Row-level security per admin
+AWS Step Functions      | c3l-nli-ConsentShareStateMachine           | Consent pipeline orchestration
+AWS Glue                | Database: c3l_nli_raw_devices              | Data catalog from crawlers
+AWS Glue                | Crawlers: c3l-nli-whoop-*-crawler x6      | Schema inference from S3
+Amazon Athena           | Output: s3://.../athena-results/           | SQL queries on Glue/S3
+Amazon DataZone         | Domain: dzd-cv79bbxiotkqsi                 | Governance & discovery
+AWS Lake Formation      | Row filters + LF-Tags                      | Row-level access control
+IAM Role                | c3l-nli-LambdaExecutionRole                | Lambda execution
+IAM Role                | NextLevelStudentRole                       | Cognito-linked: students
+IAM Role                | NextLevelAdminRole                         | Cognito-linked: admins
+IAM Role                | c3l-nli-StepFunctionExecutionRole          | Step Function -> Lambda
+IAM Role                | c3l-engageai-glue-crawler-anl              | Glue crawler S3 + catalog
+
+
+================================================================================
+SECTION 13 — BACKEND API ENDPOINTS  (backend/server.js)
+================================================================================
+
+METHOD | PATH                           | PURPOSE
+-------|--------------------------------|----------------------------------------
+GET    | /api/auth/whoop                | Start Whoop OAuth (redirect to Whoop)
+GET    | /api/auth/whoop/callback       | Receive code, fetch all 6 data types,
+       |                               | upload to S3, log to DynamoDB
+GET    | /api/whoop/data                | Return latest Whoop JSON from local file
+POST   | /api/whoop/refresh             | Use refresh_token to re-fetch Whoop data
+GET    | /api/auth/apple                | Start Apple Health (simulated redirect)
+GET    | /api/auth/apple/callback       | Save mock Apple Health data locally
+POST   | /api/signup                    | Save new user signup to JSON file
+POST   | /api/forgot-password           | Simulated password reset check
+GET    | /api/permissions/:userId       | Get all device permissions (DynamoDB)
+PUT    | /api/permissions/:userId/:dev  | Set sharing toggle in DynamoDB
+GET    | /api/sync-logs/:userId         | Get sync history from DynamoDB
+POST   | /api/chat                      | Mock AI chat response
+
+
+================================================================================
+SECTION 14 — IAM ROLES & POLICIES
+================================================================================
+
+ROLE                               | STATUS      | PURPOSE
+-----------------------------------|-------------|----------------------------------
+c3l-nli-LambdaExecutionRole        | Pre-existing| Execution role for all Lambdas
+NextLevelStudentRole               | Created     | Cognito authenticated - students
+NextLevelAdminRole                 | Created     | Cognito authenticated - admins
+c3l-nli-StepFunctionExecutionRole  | Created     | Step Function to invoke Lambdas
+c3l-NextLevelInsights-backend-role | Pre-existing| Backend server role
+c3l-NextLevelInsights-datazone-role| Pre-existing| DataZone role
+c3l-engageai-glue-crawler-anl      | Pre-existing| Glue crawler access
+
+Policies on c3l-nli-LambdaExecutionRole:
+  - AWSLambdaBasicExecutionRole
+  - AmazonDynamoDBFullAccess
+  - AmazonS3FullAccess
+  - AWSGlueConsoleFullAccess
+  - AWSLakeFormationCrossAccountManager
+  - AmazonDataZoneFullAccess
+
+
+================================================================================
+SECTION 15 — WHAT STILL NEEDS DEPLOYING
+================================================================================
+
+#  | TASK                                    | COMMAND / FILE
+---|------------------------------------------|----------------------------------
+1  | Deploy 9 Lambda functions               | See docs/deployed-resources.md §6
+2  | Deploy Step Function                    | See docs/deployed-resources.md §7
+3  | Create DynamoDB table c3l-nli-user-     | See docs/deployed-resources.md §13
+   | consent (new per-admin V2 table)        |
+4  | Create DataZone projects                | aws datazone create-project ...
+   | (Students / Staff / Admin)              |
+5  | Wire frontend POST /consent             | Update backend/server.js or
+   | -> Step Function                        | add API Gateway endpoint
+6  | Create LF role grants for               | See docs/lakeformation-tags.txt
+   | NextLevelAdminRole                      |
+
+================================================================================
+SECTION 16 — FULL PIPELINE DIAGRAM: Whoop OAuth → Admin Dashboard
+================================================================================
+
+Updated: 2026-03-04  (reflects AdminDashboard.vue real-data wiring)
+
+                         STUDENT BROWSER
+                               |
+                    clicks "Connect Whoop"
+                               |
+                               v
+                    ConnectedServices.vue
+                    window.location =
+                    http://localhost:3001/api/auth/whoop
+                               |
+                               v
+               ┌───────────────────────────────┐
+               │   Express Backend (port 3001)  │
+               │   GET /api/auth/whoop          │
+               │   reads WHOOP_CLIENT_ID from   │
+               │   project root .env            │
+               └──────────────┬────────────────┘
+                              |
+                    redirect 302 to Whoop OAuth
+                              |
+                              v
+               https://api.prod.whoop.com/oauth/oauth2/auth
+               (user logs in, approves 6 scopes)
+                              |
+                              v
+               ┌──────────────────────────────────────┐
+               │   GET /api/auth/whoop/callback?code=  │
+               │   1. Exchange code -> access_token     │
+               │   2. Fetch 6 data types in parallel   │
+               │   3. Save session bundle locally      │
+               │      backend/data/whoop/user_data/    │
+               └──────────┬───────────────────────────┘
+                          |
+              ┌───────────┼────────────────────────────┐
+              v           v           v                 v
+         recovery     sleep       cycles            workout
+              |           |           |                 |
+              v           v           v                 v
+   ┌────────────────────────────────────────────────────────┐
+   │           Amazon S3                                     │
+   │   c3l-nextlevelinsights-data-lake                      │
+   │                                                        │
+   │  raw/whoop/recovery/2026/03/04/<userId>_recovery.json  │
+   │  raw/whoop/sleep/2026/03/04/<userId>_sleep.json        │
+   │  raw/whoop/cycles/2026/03/04/<userId>_cycles.json      │
+   │  raw/whoop/workout/2026/03/04/<userId>_workout.json    │
+   │  raw/whoop/profile/2026/03/04/<userId>_profile.json    │
+   │  raw/whoop/body_measurement/...json                    │
+   └─────────────────────┬──────────────────────────────────┘
+                         |
+   ┌─────────────────────v──────────────────────────────────┐
+   │           AWS Glue Crawlers  (x6 per data type)        │
+   │   c3l-nli-whoop-recovery-crawler                       │
+   │   c3l-nli-whoop-sleep-crawler                          │
+   │   c3l-nli-whoop-cycles-crawler                         │
+   │   c3l-nli-whoop-workout-crawler                        │
+   │   c3l-nli-whoop-profile-crawler                        │
+   │   c3l-nli-whoop-body_measurement-crawler               │
+   └─────────────────────┬──────────────────────────────────┘
+                         |
+   ┌─────────────────────v──────────────────────────────────┐
+   │           AWS Glue Data Catalog                         │
+   │   Database: c3l_nli_raw_devices                        │
+   │                                                        │
+   │   Tables auto-inferred from JSON schema:               │
+   │     whoop_recovery_recovery                            │
+   │     whoop_sleep_sleep                                  │
+   │     whoop_cycles_cycles                                │
+   │     whoop_workout_workout                              │
+   │     whoop_profile_profile                              │
+   │     whoop_body_measurement_body_measurement            │
+   └─────────────────────┬──────────────────────────────────┘
+                         |
+   ┌─────────────────────v──────────────────────────────────┐
+   │           Amazon DataZone                               │
+   │   Domain: dzd-cv79bbxiotkqsi                           │
+   │                                                        │
+   │   Lambda c3l-nli-UpdateDataZoneAsset triggers sync     │
+   │   Each Glue table registered as a governed Data Product│
+   │                                                        │
+   │   Data Product Name                    Records (real)  │
+   │   c3l-nli_whoop_dev_raw_recovery          63           │
+   │   c3l-nli_whoop_dev_raw_sleep             65           │
+   │   c3l-nli_whoop_dev_raw_cycles            75           │
+   │   c3l-nli_whoop_dev_raw_workout           75           │
+   │   c3l-nli_whoop_dev_raw_profile            3           │
+   │   c3l-nli_whoop_dev_raw_body_measurement   3           │
+   └─────────────────────┬──────────────────────────────────┘
+                         |
+   ┌─────────────────────v──────────────────────────────────┐
+   │           Amazon Athena                                 │
+   │   Queried by c3l-nli-AdminDashboard Lambda              │
+   │                                                        │
+   │   SELECT owner_id, email,                              │
+   │          AVG(recovery_score)          AS avg_recovery,  │
+   │          AVG(sleep_performance_pct)   AS avg_sleep,     │
+   │          AVG(hrv_rmssd_milli)         AS avg_hrv,       │
+   │          COUNT(*)                     AS records        │
+   │   FROM   whoop_recovery_recovery                       │
+   │   WHERE  owner_id IN ('<student_id_1>', ...)           │
+   │     AND  date >= date('2026-01-01')                    │
+   │   GROUP BY owner_id, email;                            │
+   │                                                        │
+   │   Output -> s3://...data-lake/athena-results/          │
+   └─────────────────────┬──────────────────────────────────┘
+                         |
+   ┌─────────────────────v──────────────────────────────────┐
+   │   c3l-nli-AdminDashboard Lambda  [DEPLOYED]            │
+   │   1. Verify Cognito JWT (pool: 7lxzyRc1Z)              │
+   │   2. Check cognito:groups includes "admin"             │
+   │   3. Query DynamoDB nextlevel-consent GSI              │
+   │   4. Run Athena WHERE owner_id IN (student_subs)       │
+   │   5. Return JSON rows                                  │
+   └─────────────────────┬──────────────────────────────────┘
+                         |
+   ┌─────────────────────v──────────────────────────────────┐
+   │   LOCAL FALLBACK (current development mode)            │
+   │   GET /api/admin/whoop-summary                         │
+   │   Reads backend/data/whoop/user_data/*.json            │
+   │   Aggregates per user: avg recovery, avg sleep, HRV    │
+   │   Returns: rows[] + data_products[] (same schema       │
+   │   as Athena output — no frontend changes needed        │
+   │   when Lambda is deployed)                             │
+   └─────────────────────┬──────────────────────────────────┘
+                         |
+   ┌─────────────────────v──────────────────────────────────┐
+   │           AdminDashboard.vue (Frontend)                 │
+   │                                                        │
+   │  LEFT SIDEBAR - Data Products Panel                    │
+   │    [Whoop Recovery        63 records]  <-- clickable   │
+   │    [Whoop Sleep           65 records]                  │
+   │    [Whoop Cycles          75 records]                  │
+   │    [Whoop Workout         75 records]                  │
+   │    [Whoop Profile          3 records]                  │
+   │    [Whoop Body Measurement 3 records]                  │
+   │                                                        │
+   │  MAIN AREA                                             │
+   │    Stats: 1 student | 74.2% sleep | 63.6 recovery      │
+   │    Athena SQL preview block                            │
+   │    Analytics table:                                    │
+   │      owner_id | EMAIL             | Name  | Recovery   │
+   │      12922709 | marko@gmail.com   | Marko | [===] 63.6 │
+   │    [Export CSV] -> whoop_analytics_2026-03-04.csv      │
+   └────────────────────────────────────────────────────────┘
+
+REAL DATA CONFIRMED (2026-03-04 sync):
+  User: Marko Joksimovic <marko.joksimovic16@gmail.com>
+  avg_recovery_score:    63.6   (across 63 scored records)
+  avg_sleep_performance: 74.2%  (across 65 sleep records)
+  avg_hrv_rmssd:         56.0   (HRV in milliseconds)
+  avg_resting_hr:        61.2   (beats per minute)
+
+================================================================================
+SECTION 17 — DATAZONE DATA PRODUCTS TABLE (with Athena column mapping)
+================================================================================
+
+Domain: dzd-cv79bbxiotkqsi   |   Project: 62guenc68nuvxe
+
+Data Product Name                        | Glue Table                              | S3 Prefix
+-----------------------------------------|-----------------------------------------|-----------------------------
+c3l-nli_whoop_dev_raw_recovery           | whoop_recovery_recovery                 | raw/whoop/recovery/
+c3l-nli_whoop_dev_raw_sleep              | whoop_sleep_sleep                       | raw/whoop/sleep/
+c3l-nli_whoop_dev_raw_cycles             | whoop_cycles_cycles                     | raw/whoop/cycles/
+c3l-nli_whoop_dev_raw_workout            | whoop_workout_workout                   | raw/whoop/workout/
+c3l-nli_whoop_dev_raw_profile            | whoop_profile_profile                   | raw/whoop/profile/
+c3l-nli_whoop_dev_raw_body_measurement   | whoop_body_measurement_body_measurement | raw/whoop/body_measurement/
+
+Athena columns (auto-inferred by Glue crawler from nested JSON):
+  recovery:  cycle_id, user_id, score.recovery_score, score.resting_heart_rate,
+             score.hrv_rmssd_milli, score.spo2_percentage, score.skin_temp_celsius
+  sleep:     id, user_id, start, end, nap, score.sleep_performance_percentage,
+             score.sleep_consistency_percentage, score.sleep_efficiency_percentage,
+             score.stage_summary.total_rem_sleep_time_milli, ...
+  profile:   user_id, EMAIL, first_name, last_name  <- EMAIL joins to all other tables
+  body:      height_meter, weight_kilogram, max_heart_rate
+
+EMAIL COLUMN:
+  The email address is stored in user_profile.email inside every sync file.
+  Glue infers it as a top-level column in the profile table.
+  The /api/admin/whoop-summary endpoint flattens it out and mirrors it in
+  every analytics row, so the Admin Dashboard table shows:
+    owner_id | email | display_name | avg_recovery | avg_sleep | ...
+  This mirrors the Athena output schema for schema-compatible migration.
+
+================================================================================
+END OF DOCUMENT
+================================================================================

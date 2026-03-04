@@ -1,0 +1,164 @@
+================================================================================
+c3l-NLI — COMPLETE PLATFORM ARCHITECTURE
+NextLevel Insights | AWS | ap-southeast-2
+Account: 184898280326 | Profile: c3l-analytics
+================================================================================
+
+PLATFORM OVERVIEW
+-----------------
+NextLevel Insights (NLI) is an enterprise-grade, consent-driven, multi-tenant
+data platform that ingests student health and academic data, normalises it to
+a stable canonical schema, governs access via Lake Formation, and makes data
+available for analytics via Athena — all with explicit student consent.
+
+Naming Convention: All resources prefixed with "c3l-nli-"
+
+
+================================================================================
+ROLES (UPDATED 2026-03-04 — Simplified to 2 Active Roles)
+================================================================================
+
+NOTE: Backend AWS DataZone only has admin role. Frontend handles
+      admin and student (student) UI states only.
+
+ROLE 1 — STUDENT
+  - Owns their own data
+  - Logs in via Cognito (group: students)
+  - Cognito sub (UUID) = canonical identity — NEVER use email as identity key
+  - Clicks "Share with specific admins" in UI
+  - Selects which admin(s) to share specific data with
+  - Can share with Admin2 and Admin4 but NOT Admin1 and Admin7
+  - Consent stored in DynamoDB c3l-nli-user-consent per admin sub
+  - Sidebar shows: My Data, Data Resources, Data Permissions, AI Chat
+  - Does NOT see Admin section in sidebar
+
+ROLE 2 — ADMIN
+  - Logs in via Cognito (group: admin)
+  - Cognito sub (UUID) = admin_sub — identity key for consent lookup
+  - Sees Admin section in sidebar (purple): "Admin Session" > "Data Dashboard"
+  - Dashboard only shows students who explicitly consented to THEIR admin_sub
+  - Cannot see data from students who shared with other admins
+  - Backend: c3l-nli-AdminDashboard Lambda builds Athena query scoped to
+    their admin_sub only (via DynamoDB GSI1 lookup)
+  - IAM Role: NextLevelAdminRole
+
+
+================================================================================
+COMPLETE FLOW
+================================================================================
+
+  Student Login (Cognito)
+          |  OAuth2 — issues JWT access token
+          v
+  Click "Share Resource" in NextLevel Insights UI
+          |  POST /consent  { token, resources: ["health#whoop", "academic#canvas_lms"] }
+          v
+  API Gateway  (c3l-nli-ConsentAPI)
+          |  Passes payload to Step Functions
+          v
+  Step Function: c3l-nli-ConsentShareStateMachine
+          |
+          +--[1] c3l-nli-ValidateJWT (Lambda)
+          |       Verifies Cognito token
+          |       Extracts: student_id, role
+          |
+          +--[2] c3l-nli-StoreConsent (Lambda)
+          |       Writes to DynamoDB: nextlevel-consent
+          |       PK = STUDENT#<id>  SK = RESOURCE#<domain>#<device>
+          |
+          +--[3] Map State: ForEach resource (parallel, MaxConcurrency=5)
+                  |
+                  +-- Choice: health#* → Health Branch
+                  |           academic#* → Academic Branch
+                  |
+                  HEALTH BRANCH:
+                  | c3l-nli-IngestHealth (Lambda)
+                  |   Whoop API v2, Fitbit API v1, Oura v2, etc.
+                  |   → s3://c3l-nextlevelinsights-data-lake/
+                  |       raw/domain=health/device_type=<x>/year/month/day/
+                  |
+                  | c3l-nli-NormalizeHealth (Lambda)
+                  |   Converts to canonical schema (6 fields)
+                  |   → processed/domain=health/product=health_metrics/
+                  |
+                  ACADEMIC BRANCH:
+                  | c3l-nli-IngestAcademic (Lambda)
+                  |   Canvas LMS API, Moodle REST, Blackboard REST
+                  |   → raw/domain=academic/device_type=<lms>/year/month/day/
+                  |
+                  | c3l-nli-NormalizeAcademic (Lambda)
+                  |   Converts to canonical schema
+                  |   → processed/domain=academic/product=academic_engagement/
+                  |
+                  SHARED STEPS (both branches):
+                  | c3l-nli-UpdateGluePartition (Lambda)
+                  |   Starts Glue crawler (auto-creates if missing)
+                  |   Crawler: c3l-nli-<domain>-<device>-crawler
+                  |   Glue DB: c3l_nli_raw_devices
+                  |
+                  | c3l-nli-UpdateDataZoneAsset (Lambda)
+                  |   Triggers DataZone data-source sync
+                  |   Domain: dzd-cv79bbxiotkqsi
+                  |
+                  | c3l-nli-UpdateLakeFormationFilter (Lambda)
+                  |   Creates/updates row-level filter on Glue table
+                  |   StaffRole: can query WHERE student_id IN (consented list)
+                  |
+                  v
+          ATHENA READY
+          Staff/Admin can query via Athena
+          Governance enforced by Lake Formation row filter
+
+
+================================================================================
+AWS RESOURCES SUMMARY
+================================================================================
+
+S3 Bucket       : c3l-nextlevelinsights-data-lake
+DynamoDB Table  : nextlevel-consent
+  (also)        : c3l-NextLevelInsights-DataSyncLogs (existing)
+Glue Database   : c3l_nli_raw_devices
+Glue IAM Role   : arn:aws:iam::184898280326:role/c3l-engageai-glue-crawler-anl
+DataZone Domain : dzd-cv79bbxiotkqsi
+DataZone Project: 62guenc68nuvxe
+DataZone Source : bpr42x2umdut9e
+Cognito Pool    : (configured via COGNITO_USER_POOL_ID env var)
+Step Function   : c3l-nli-ConsentShareStateMachine
+Lambda Region   : ap-southeast-2
+
+
+================================================================================
+SUPPORTED DEVICES / LMS SOURCES
+================================================================================
+
+Health Domain (device_type values):
+  whoop           Whoop API v2
+  apple_watch     Apple HealthKit server export
+  fitbit          Fitbit Web API v1
+  oura            Oura Ring API v2
+  garmin          Garmin Health API (placeholder)
+  samsung_watch   Samsung Health Partner API (placeholder)
+
+Academic Domain (device_type values):
+  canvas_lms      Canvas LMS API
+  moodle          Moodle Web Services REST
+  blackboard      Blackboard Learn REST (placeholder)
+
+Adding a new device = new device_type value only.
+No schema change. No new table. No new data product.
+Just extend the switch() in IngestHealth or IngestAcademic Lambda.
+
+
+================================================================================
+DESIGN PRINCIPLES
+================================================================================
+
+1. Schema-stable    : Canonical 6-field schema never changes
+2. Device-extensible: New device = new device_type string value only
+3. Multi-tenant     : student_id in every row + Lake Formation row filter
+4. Consent-driven   : No data moves without DynamoDB consent record
+5. Governance-first : Lake Formation enforces access, not just IAM
+6. DataZone catalog : Business-friendly discovery + subscription workflow
+
+
+================================================================================

@@ -1,0 +1,250 @@
+{
+    "Comment": "c3l-nli-ConsentShareStateMachine — Consent-driven data ingestion pipeline. Student Login -> Share Resource -> Ingest -> Normalize -> Glue -> DataZone -> Lake Formation -> Athena ready.",
+    "StartAt": "ValidateJWT",
+    "States": {
+        "ValidateJWT": {
+            "Type": "Task",
+            "Comment": "Step 1: Verify Cognito access token. Extract student_id and role.",
+            "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-ValidateJWT",
+            "Parameters": {
+                "token.$": "$.token",
+                "resources.$": "$.resources"
+            },
+            "ResultPath": "$.auth",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException"
+                    ],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "Next": "AuthFailed",
+                    "ResultPath": "$.error"
+                }
+            ],
+            "Next": "StoreConsent"
+        },
+        "AuthFailed": {
+            "Type": "Fail",
+            "Error": "AuthenticationError",
+            "Cause": "JWT validation failed — invalid or expired Cognito token"
+        },
+        "StoreConsent": {
+            "Type": "Task",
+            "Comment": "Step 2: Write consent records to DynamoDB nextlevel-consent. One row per resource per student.",
+            "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-StoreConsent",
+            "Parameters": {
+                "student_id.$": "$.auth.student_id",
+                "role.$": "$.auth.role",
+                "resources.$": "$.auth.resources"
+            },
+            "ResultPath": "$.consent",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException"
+                    ],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Next": "MapOverResources"
+        },
+        "MapOverResources": {
+            "Type": "Map",
+            "Comment": "Step 3: Process each shared resource (domain#device_type) in parallel.",
+            "ItemsPath": "$.consent.resources",
+            "MaxConcurrency": 5,
+            "Iterator": {
+                "StartAt": "ParseResource",
+                "States": {
+                    "ParseResource": {
+                        "Type": "Pass",
+                        "Comment": "Split domain#device_type string into domain and device_type fields.",
+                        "Parameters": {
+                            "student_id.$": "$$.Execution.Input.auth.student_id",
+                            "resource.$": "$",
+                            "access_tokens.$": "$$.Execution.Input.access_tokens"
+                        },
+                        "Next": "ChooseDomain"
+                    },
+                    "ChooseDomain": {
+                        "Type": "Choice",
+                        "Comment": "Route to health or academic branch based on domain prefix in resource string.",
+                        "Choices": [
+                            {
+                                "Variable": "$.resource",
+                                "StringMatches": "health#*",
+                                "Next": "HealthBranch_Ingest"
+                            },
+                            {
+                                "Variable": "$.resource",
+                                "StringMatches": "academic#*",
+                                "Next": "AcademicBranch_Ingest"
+                            }
+                        ],
+                        "Default": "UnsupportedDomain"
+                    },
+                    "UnsupportedDomain": {
+                        "Type": "Fail",
+                        "Error": "UnsupportedDomain",
+                        "Cause": "Domain is not health or academic. Extend ChooseDomain with new branch."
+                    },
+                    "HealthBranch_Ingest": {
+                        "Type": "Task",
+                        "Comment": "Health Step 1: Pull raw data from wearable device API → S3 raw/domain=health/",
+                        "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-IngestHealth",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "device_type.$": "$.resource",
+                            "access_token.$": "$.access_tokens.health"
+                        },
+                        "ResultPath": "$.ingest",
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException"
+                                ],
+                                "IntervalSeconds": 5,
+                                "MaxAttempts": 2,
+                                "BackoffRate": 2
+                            }
+                        ],
+                        "Next": "HealthBranch_Normalize"
+                    },
+                    "HealthBranch_Normalize": {
+                        "Type": "Task",
+                        "Comment": "Health Step 2: Convert raw → canonical schema → S3 processed/domain=health/product=health_metrics/",
+                        "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-NormalizeHealth",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "device_type.$": "$.ingest.device_type",
+                            "domain": "health",
+                            "s3_raw_key.$": "$.ingest.s3_raw_key",
+                            "s3_bucket.$": "$.ingest.s3_bucket"
+                        },
+                        "ResultPath": "$.normalize",
+                        "Next": "UpdateGluePartition"
+                    },
+                    "AcademicBranch_Ingest": {
+                        "Type": "Task",
+                        "Comment": "Academic Step 1: Pull raw data from LMS API → S3 raw/domain=academic/",
+                        "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-IngestAcademic",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "device_type.$": "$.resource",
+                            "access_token.$": "$.access_tokens.academic"
+                        },
+                        "ResultPath": "$.ingest",
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException"
+                                ],
+                                "IntervalSeconds": 5,
+                                "MaxAttempts": 2,
+                                "BackoffRate": 2
+                            }
+                        ],
+                        "Next": "AcademicBranch_Normalize"
+                    },
+                    "AcademicBranch_Normalize": {
+                        "Type": "Task",
+                        "Comment": "Academic Step 2: Convert raw → canonical schema → S3 processed/domain=academic/product=academic_engagement/",
+                        "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-NormalizeAcademic",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "device_type.$": "$.ingest.device_type",
+                            "domain": "academic",
+                            "s3_raw_key.$": "$.ingest.s3_raw_key",
+                            "s3_bucket.$": "$.ingest.s3_bucket"
+                        },
+                        "ResultPath": "$.normalize",
+                        "Next": "UpdateGluePartition"
+                    },
+                    "UpdateGluePartition": {
+                        "Type": "Task",
+                        "Comment": "Step 3: Start Glue crawler for the new S3 partition. Auto-creates crawler if missing.",
+                        "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-UpdateGluePartition",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "device_type.$": "$.normalize.device_type",
+                            "domain.$": "$.normalize.domain",
+                            "s3_processed_key.$": "$.normalize.s3_processed_key",
+                            "s3_processed_bucket.$": "$.normalize.s3_processed_bucket",
+                            "record_count.$": "$.normalize.record_count"
+                        },
+                        "ResultPath": "$.glue",
+                        "TimeoutSeconds": 240,
+                        "Next": "UpdateDataZoneAsset"
+                    },
+                    "UpdateDataZoneAsset": {
+                        "Type": "Task",
+                        "Comment": "Step 4: Trigger DataZone data-source sync so new Glue table appears in catalog.",
+                        "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-UpdateDataZoneAsset",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "domain.$": "$.glue.domain",
+                            "device_type.$": "$.glue.device_type",
+                            "glue_state.$": "$.glue.glue_state"
+                        },
+                        "ResultPath": "$.datazone",
+                        "TimeoutSeconds": 360,
+                        "Next": "UpdateLakeFormationFilter"
+                    },
+                    "UpdateLakeFormationFilter": {
+                        "Type": "Task",
+                        "Comment": "Step 5: Upsert Lake Formation row filter. Staff can only query rows of consented students.",
+                        "Resource": "arn:aws:lambda:ap-southeast-2:184898280326:function:c3l-nli-UpdateLakeFormationFilter",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "domain.$": "$.datazone.domain",
+                            "device_type.$": "$.datazone.device_type"
+                        },
+                        "ResultPath": "$.lakeformation",
+                        "Next": "ResourceComplete"
+                    },
+                    "ResourceComplete": {
+                        "Type": "Pass",
+                        "Comment": "Resource pipeline complete. Athena query is now ready for this student + domain.",
+                        "Parameters": {
+                            "student_id.$": "$.student_id",
+                            "domain.$": "$.lakeformation.domain",
+                            "device_type.$": "$.lakeformation.device_type",
+                            "record_count.$": "$.lakeformation.record_count",
+                            "lf_filter.$": "$.lakeformation.lf_filter_name",
+                            "pipeline_complete": true,
+                            "athena_ready": true,
+                            "completed_at.$": "$$.State.EnteredTime"
+                        },
+                        "End": true
+                    }
+                }
+            },
+            "ResultPath": "$.pipeline_results",
+            "Next": "PipelineComplete"
+        },
+        "PipelineComplete": {
+            "Type": "Pass",
+            "Comment": "All resources processed. Student data is now available in Athena with Lake Formation governance.",
+            "Parameters": {
+                "status": "SUCCESS",
+                "student_id.$": "$.auth.student_id",
+                "resources_count.$": "States.ArrayLength($.pipeline_results)",
+                "pipeline_results.$": "$.pipeline_results"
+            },
+            "End": true
+        }
+    }
+}

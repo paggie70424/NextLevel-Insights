@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuth } from '../composables/useAuth'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -74,8 +75,27 @@ const router = createRouter({
       path: '/ai-chat',
       name: 'ai-chat',
       component: () => import('../views/AIChat.vue')
+    },
+    // ─── Admin Routes ───────────────────────────────────────────────
+    {
+      path: '/admin/dashboard',
+      name: 'admin-dashboard',
+      component: () => import('../views/AdminDashboard.vue'),
+      meta: { requiresAdmin: true }
     }
   ]
+})
+
+// ── Navigation Guard: role-based access control ─────────────────────
+router.beforeEach((to) => {
+  const { isAdmin, isLoggedIn } = useAuth()
+
+  if (to.meta.requiresAdmin) {
+    // Not logged in or not admin → redirect to home
+    if (!isLoggedIn.value || !isAdmin.value) {
+      return { name: 'connected-services' }
+    }
+  }
 })
 
 export default router

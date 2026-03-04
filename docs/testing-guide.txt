@@ -1,0 +1,849 @@
+================================================================================
+c3l-NextLevelInsights (NLI) — TESTING GUIDE
+Step-by-step: UI manual tests + CLI scripts
+================================================================================
+Updated: 2026-03-04
+Covers: Student account, Admin account, Whoop OAuth, Pipeline, AWS checks
+================================================================================
+
+
+════════════════════════════════════════════════════════════════════════════════
+PRE-FLIGHT: START SERVERS
+════════════════════════════════════════════════════════════════════════════════
+
+Open two terminal windows before running any test.
+
+TERMINAL 1 — Backend (Express + AWS SDK)
+  cd /Users/pei-yiliu/Workspace/c3l/hackathon/anitigravity_hack
+  node backend/server.js
+
+  Expected output:
+    Backend server listening at http://localhost:3001
+    [c3l-NextLevelInsights] DynamoDB region: ap-southeast-2
+    [c3l-NextLevelInsights] Permissions table: c3l-NextLevelInsights-UserDevicePermissions
+    [c3l-NextLevelInsights] Sync logs table:   c3l-NextLevelInsights-DataSyncLogs
+    Local data storage initialized at .../backend/data
+
+TERMINAL 2 — Frontend (Vite)
+  cd /Users/pei-yiliu/Workspace/c3l/hackathon/anitigravity_hack
+  npm run dev
+
+  Expected output:
+    VITE v5.x  ready
+    -> Local: http://localhost:5173/
+
+Open browser: http://localhost:5173
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 1 — STUDENT ACCOUNT (UI Manual Test)
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Create a student account and verify role-based navigation.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 1.1 — Sign Up as Student
+────────────────────────────────────────────────────────────────────────────────
+1. Open http://localhost:5173
+2. Click "Sign In" button in the top-right header
+3. On the modal, click "Sign Up" at the bottom footer link
+4. Fill in:
+     I am a:     [x] Student  (click the 🎓 Student tile)
+     Prefix:     Mr
+     Gender:     Male
+     First Name: Alex
+     Last Name:  Chen
+     Email:      alex.chen@test.edu
+     Phone:      0400000001
+     Password:   Test1234!
+
+5. Click "Sign Up" button
+   EXPECT: Green status message "Account created! Data saved to S3."
+   EXPECT: Modal closes automatically after ~1.5 seconds
+
+6. Check backend terminal:
+   EXPECT: "Successfully saved user data to .../backend/data/whoop/signup/..."
+
+7. Verify signup file created:
+   ls backend/data/whoop/signup/
+   EXPECT: A file named like: 2026-03-04T..._alex.chen@test.edu.json
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 1.2 — Sign In as Student
+────────────────────────────────────────────────────────────────────────────────
+1. Click "Sign In" in the header
+2. Fill in:
+     I am a:   [x] Student  (🎓 tile)
+     Email:    alex.chen@test.edu
+     Password: Test1234!
+3. Click "Sign In"
+   EXPECT: "Welcome back! Signed in as Student."
+   EXPECT: Modal closes
+
+4. Check sidebar (left panel):
+   EXPECT: Role badge shows green  "STUDENT"  pill
+   EXPECT: Email address "alex.chen@test.edu" shown under badge
+   EXPECT: Nav shows:  Connected Services, Data Resources (expandable),
+           Data Permissions, Data Insights, Data Retention, AI Chat
+   EXPECT: NO "Admin Session" section visible in sidebar
+
+5. Try navigating to http://localhost:5173/admin/dashboard manually
+   EXPECT: Redirected back to /connected-services  (router guard active)
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 1.3 — Student: Duplicate Sign Up Rejection
+────────────────────────────────────────────────────────────────────────────────
+1. Click "Sign In" -> "Sign Up"
+2. Use the same email: alex.chen@test.edu
+3. Click "Sign Up"
+   EXPECT: Red error "You have signed up before, please log in."
+   EXPECT: HTTP 409 Conflict returned from backend
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 2 — ADMIN ACCOUNT (UI Manual Test)
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Create an admin account and verify admin-only UI is unlocked.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 2.1 — Sign Up as Admin
+────────────────────────────────────────────────────────────────────────────────
+1. Click "Sign In" -> "Sign Up"
+2. Fill in:
+     I am a:     [x] Admin / Staff  (💼 tile)
+     Prefix:     Dr
+     Gender:     Female
+     First Name: Jordan
+     Last Name:  Smith
+     Email:      jordan.smith@uni.edu
+     Phone:      0400000002
+     Password:   Admin1234!
+3. Click "Sign Up"
+   EXPECT: Green "Account created!"
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 2.2 — Sign In as Admin
+────────────────────────────────────────────────────────────────────────────────
+1. Click "Sign In"
+2. Fill in:
+     I am a:   [x] Admin / Staff  (💼 tile)
+     Email:    jordan.smith@uni.edu
+     Password: Admin1234!
+3. Click "Sign In"
+   EXPECT: "Welcome back! Signed in as Admin."
+
+4. Check sidebar:
+   EXPECT: Role badge shows PURPLE  "ADMIN"  pill
+   EXPECT: Email "jordan.smith@uni.edu" shown
+   EXPECT: Below the divider:  "Admin Session" section appears (purple label)
+   EXPECT: "Data Dashboard" accordion visible (with "Student Analytics" sub-item)
+
+5. Click "Student Analytics" in sidebar  (or navigate to /admin/dashboard)
+   EXPECT: Admin Dashboard page loads with:
+     - Header "Data Dashboard"
+     - AWS services strip: Cognito → DynamoDB → Lambda → Athena → DataZone
+     - Purple info banner with admin_sub UUID
+     - Stats cards: Students Sharing / Avg Sleep / Avg Recovery / Datasets
+     - "Students Who Shared With You" list (mock: Alex Chen, Jordan Smith, Riley Park)
+     - Athena query preview panel (SQL block)
+     - Analytics table with sleep/recovery score bars
+     - Architecture steps explanation
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 2.3 — Admin: Blocked for Student Role
+────────────────────────────────────────────────────────────────────────────────
+1. Log out (or clear localStorage via DevTools -> Application -> localStorage -> Clear All)
+2. Sign in as Student (alex.chen@test.edu)
+3. Navigate to http://localhost:5173/admin/dashboard
+   EXPECT: Shows "Admin Access Only" access-denied card (red border)
+   EXPECT: Shows "Your current role: student"
+   EXPECT: "← Go back to My Dashboard" button visible
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 3 — WHOOP OAUTH + DATA RETRIEVAL (Real API Test)
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Connect to real Whoop API, retrieve data, verify S3 + DynamoDB writes.
+
+PRE-REQUISITE: You must have a Whoop developer account and the app registered
+at https://developer.whoop.com/ with redirect URI:
+  http://localhost:3001/api/auth/whoop/callback
+Your .env already has the correct client ID and secret.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 3.1 — Connect Whoop via UI
+────────────────────────────────────────────────────────────────────────────────
+1. Sign in as Student (or Admin)
+2. Click "Connected Services" in sidebar
+3. Find the "Whoop" card (shows "Not Connected" badge)
+4. Click the green "Connect" button
+
+   EXPECT: Browser redirects to https://api.prod.whoop.com/oauth/oauth2/auth
+   EXPECT: Whoop login page appears in browser
+
+5. Log in to your Whoop account in the browser popup
+6. Click "Allow" on the permissions screen
+   Scopes granted:
+     offline, read:recovery, read:cycles, read:sleep,
+     read:workout, read:profile, read:body_measurement
+
+   EXPECT: Whoop redirects back to http://localhost:3001/api/auth/whoop/callback?code=...
+
+7. Backend processes the callback — watch TERMINAL 1:
+   EXPECT log output:
+     --- Whoop Callback Received ---
+     Code received: true
+     Exchanging code for token...
+     Token exchange successful.
+     Granted Scopes: offline read:recovery read:cycles ...
+     Fetching Whoop data from API...
+     ✓ Fetched Profile
+     ✓ Fetched Body
+     ✓ Fetched Recovery
+     ✓ Fetched Cycle
+     ✓ Fetched Sleep
+     ✓ Fetched Workout
+     [Local] Saved → <timestamp>_whoop_data.json
+     [S3] Uploaded → s3://c3l-nextlevelinsights-data-lake/raw/whoop/recovery/...
+     [DynamoDB] Sync log: whoop/recovery (success) → s3://...
+     ... (6 S3 uploads + 6 DynamoDB writes)
+     [Pipeline] Whoop uploads → recovery:✓  sleep:✓  cycles:✓  workout:✓  profile:✓  body_measurement:✓
+
+8. Browser redirects to http://localhost:5173/connected-services?status=connected&service=whoop
+   EXPECT: Whoop card now shows green "Connected" badge
+   EXPECT: Button changes to "Disconnect"
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 3.2 — Verify local Whoop file saved
+────────────────────────────────────────────────────────────────────────────────
+In a terminal:
+  ls -la backend/data/whoop/user_data/
+  EXPECT: One or more files named like: 2026-03-04Txx-xx-xx_whoop_data.json
+
+  cat backend/data/whoop/user_data/<latest-file>.json | python3 -m json.tool | head -60
+  EXPECT: JSON with keys: token_data, user_profile, body_measurement,
+         recovery_data, cycle_data, sleep_data, workout_data, synced_at
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 3.3 — Verify S3 uploads (AWS CLI)
+────────────────────────────────────────────────────────────────────────────────
+  aws s3 ls s3://c3l-nextlevelinsights-data-lake/raw/whoop/ --recursive \
+    --profile c3l-analytics
+
+  EXPECT: 6 files listed (one per data type), dated today:
+    raw/whoop/recovery/2026/03/04/<userId>_recovery.json
+    raw/whoop/sleep/2026/03/04/<userId>_sleep.json
+    raw/whoop/cycles/2026/03/04/<userId>_cycles.json
+    raw/whoop/workout/2026/03/04/<userId>_workout.json
+    raw/whoop/profile/2026/03/04/<userId>_profile.json
+    raw/whoop/body_measurement/2026/03/04/<userId>_body_measurement.json
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 3.4 — Verify DynamoDB sync logs (AWS CLI)
+────────────────────────────────────────────────────────────────────────────────
+  aws dynamodb scan \
+    --table-name c3l-NextLevelInsights-DataSyncLogs \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --query "Items[*].{id:sync_id.S,type:data_type.S,status:status.S,s3:s3_path.S}" \
+    --output table
+
+  EXPECT: 6 rows, each with status=success, data_type in:
+    recovery, sleep, cycles, workout, profile, body_measurement
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 3.5 — Retrieve Whoop data via API
+────────────────────────────────────────────────────────────────────────────────
+  curl http://localhost:3001/api/whoop/data | python3 -m json.tool | head -40
+
+  EXPECT: JSON with user_profile.first_name, recovery_data.records (array),
+         sleep_data.records (array), etc.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 3.6 — Refresh Whoop data
+────────────────────────────────────────────────────────────────────────────────
+  curl -X POST http://localhost:3001/api/whoop/refresh \
+     -H "Content-Type: application/json"
+
+  EXPECT backend log:
+    --- Refreshing Whoop Data ---
+    Using refresh token to get new access token...
+    Token refreshed successfully.
+    ✓ Fetched Profile, Body, Recovery, Cycle, Sleep, Workout
+
+  EXPECT: New timestamped file in backend/data/whoop/user_data/
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 4 — PERMISSIONS API (DynamoDB Write/Read)
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Verify the device permissions table can be written and read.
+Replace <userId> with a real sub UUID or use "test-user-001" for local testing.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 4.1 — Set Whoop permission (sharing = true)
+────────────────────────────────────────────────────────────────────────────────
+  curl -X PUT http://localhost:3001/api/permissions/test-user-001/whoop \
+    -H "Content-Type: application/json" \
+    -d '{"sharing_allowed": true, "data_stage": "processed", "consent_version": "v1.0"}'
+
+  EXPECT HTTP 200:
+  {
+    "message": "Permission saved",
+    "user_id": "test-user-001",
+    "device_type": "whoop",
+    "sharing_allowed": true,
+    "datazone_product": "c3l-nli_whoop_dev_processed"
+  }
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 4.2 — Read back permissions
+────────────────────────────────────────────────────────────────────────────────
+  curl http://localhost:3001/api/permissions/test-user-001
+
+  EXPECT HTTP 200:
+  {
+    "user_id": "test-user-001",
+    "permissions": [
+      { "user_id": "test-user-001", "device_type": "whoop", "sharing_allowed": true, ... }
+    ]
+  }
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 4.3 — Revoke permission (sharing = false)
+────────────────────────────────────────────────────────────────────────────────
+  curl -X PUT http://localhost:3001/api/permissions/test-user-001/whoop \
+    -H "Content-Type: application/json" \
+    -d '{"sharing_allowed": false}'
+
+  EXPECT: "sharing_allowed": false  in response
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 4.4 — Read sync logs
+────────────────────────────────────────────────────────────────────────────────
+  # Replace <userId> with actual Whoop user_id (e.g., numeric id from profile)
+  curl http://localhost:3001/api/sync-logs/<userId>
+
+  EXPECT: Array of sync log entries showing each data type upload
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 5 — GLUE CRAWLER PIPELINE (AWS CLI)
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Verify that Glue crawlers can be run to register new S3 data
+into the Glue catalog (prerequisite for Athena queries).
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 5.1 — Check existing Glue tables
+────────────────────────────────────────────────────────────────────────────────
+  aws glue get-tables \
+    --database-name c3l_nli_raw_devices \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --query "TableList[*].Name" \
+    --output table
+
+  EXPECT: Table names including:
+    whoop_recovery_recovery
+    whoop_sleep_sleep
+    whoop_cycles_cycles
+    whoop_workout_workout
+    whoop_profile_profile
+    whoop_body_measurement_body_measurement
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 5.2 — Trigger a Glue crawler manually (recovery as example)
+────────────────────────────────────────────────────────────────────────────────
+  aws glue start-crawler \
+    --name c3l-nli-whoop-recovery-crawler \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  # Poll for completion (run every 10-15 seconds until State = READY)
+  aws glue get-crawler \
+    --name c3l-nli-whoop-recovery-crawler \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --query "Crawler.{State:State, LastUpdated:LastUpdated}"
+
+  EXPECT final State: READY  (after 1-3 minutes)
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 5.3 — Run all 6 Whoop crawlers (script)
+────────────────────────────────────────────────────────────────────────────────
+  Save this as /tmp/run_crawlers.sh and run: bash /tmp/run_crawlers.sh
+
+  --- SCRIPT START ---
+  #!/bin/bash
+  PROFILE="c3l-analytics"
+  REGION="ap-southeast-2"
+  CRAWLERS=(
+    "c3l-nli-whoop-recovery-crawler"
+    "c3l-nli-whoop-sleep-crawler"
+    "c3l-nli-whoop-cycles-crawler"
+    "c3l-nli-whoop-workout-crawler"
+    "c3l-nli-whoop-profile-crawler"
+    "c3l-nli-whoop-body_measurement-crawler"
+  )
+  for CRAWLER in "${CRAWLERS[@]}"; do
+    echo "Starting crawler: $CRAWLER"
+    aws glue start-crawler --name "$CRAWLER" --profile $PROFILE --region $REGION
+    sleep 2
+  done
+  echo "All crawlers started. Poll with: aws glue get-crawler --name <name>"
+  --- SCRIPT END ---
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 6 — DATAZONE CATALOG CHECK (AWS CLI)
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Verify DataZone data products exist after Glue crawlers complete.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 6.1 — List DataZone data products
+────────────────────────────────────────────────────────────────────────────────
+  aws datazone list-data-sources \
+    --domain-identifier dzd-cv79bbxiotkqsi \
+    --project-identifier 62guenc68nuvxe \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  EXPECT: data source "bpr42x2umdut9e" listed
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 6.2 — Trigger DataZone data source sync
+────────────────────────────────────────────────────────────────────────────────
+  aws datazone start-data-source-run \
+    --domain-identifier dzd-cv79bbxiotkqsi \
+    --data-source-identifier bpr42x2umdut9e \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  EXPECT: runId returned, status "REQUESTED"
+
+  # Check sync status:
+  aws datazone list-data-source-runs \
+    --domain-identifier dzd-cv79bbxiotkqsi \
+    --data-source-identifier bpr42x2umdut9e \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --query "items[0].{status:status,runType:runType,startedAt:startedAt}"
+
+  EXPECT: status "SUCCEED" after 1-2 minutes
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 7 — ADMIN DASHBOARD API TEST (c3l-nli-AdminDashboard Lambda)
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Test the deployed AdminDashboard Lambda directly.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 7.1 — Invoke Lambda with dummy payload
+────────────────────────────────────────────────────────────────────────────────
+  aws lambda invoke \
+    --function-name c3l-nli-AdminDashboard \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --payload '{"httpMethod":"GET","path":"/dashboard","headers":{"Authorization":"Bearer MOCK_TEST_NO_JWT"}}' \
+    --cli-binary-format raw-in-base64-out \
+    /tmp/admin_lambda_result.json
+
+  cat /tmp/admin_lambda_result.json
+
+  EXPECT: Response with {"statusCode": 401, "body": "..."} because no valid JWT
+  (This confirms the Lambda is deployed and reachable)
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 7.2 — Check Lambda logs
+────────────────────────────────────────────────────────────────────────────────
+  aws logs describe-log-groups \
+    --log-group-name-prefix /aws/lambda/c3l-nli-AdminDashboard \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  # Get the latest log stream:
+  aws logs describe-log-streams \
+    --log-group-name /aws/lambda/c3l-nli-AdminDashboard \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --order-by LastEventTime \
+    --descending \
+    --query "logStreams[0].logStreamName" \
+    --output text
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 8 — COGNITO USER MANAGEMENT (AWS CLI)
+════════════════════════════════════════════════════════════════════════════════
+
+Pool ID: ap-southeast-2_7lxzyRc1Z
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 8.1 — List existing Cognito groups
+────────────────────────────────────────────────────────────────────────────────
+  aws cognito-idp list-groups \
+    --user-pool-id ap-southeast-2_7lxzyRc1Z \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  EXPECT groups: students, admin
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 8.2 — Create a test student in Cognito
+────────────────────────────────────────────────────────────────────────────────
+  aws cognito-idp admin-create-user \
+    --user-pool-id ap-southeast-2_7lxzyRc1Z \
+    --username student1@test.edu \
+    --user-attributes Name=email,Value=student1@test.edu Name=email_verified,Value=true \
+    --temporary-password "TempPass1!" \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  EXPECT: User object returned with UserStatus: FORCE_CHANGE_PASSWORD
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 8.3 — Add student to the "students" group
+────────────────────────────────────────────────────────────────────────────────
+  aws cognito-idp admin-add-user-to-group \
+    --user-pool-id ap-southeast-2_7lxzyRc1Z \
+    --username student1@test.edu \
+    --group-name students \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  EXPECT: No output (success)
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 8.4 — Create a test admin in Cognito
+────────────────────────────────────────────────────────────────────────────────
+  aws cognito-idp admin-create-user \
+    --user-pool-id ap-southeast-2_7lxzyRc1Z \
+    --username admin1@uni.edu \
+    --user-attributes Name=email,Value=admin1@uni.edu Name=email_verified,Value=true \
+    --temporary-password "AdminPass1!" \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+  aws cognito-idp admin-add-user-to-group \
+    --user-pool-id ap-southeast-2_7lxzyRc1Z \
+    --username admin1@uni.edu \
+    --group-name admin \
+    --profile c3l-analytics \
+    --region ap-southeast-2
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 8.5 — List users in a group
+────────────────────────────────────────────────────────────────────────────────
+  aws cognito-idp list-users-in-group \
+    --user-pool-id ap-southeast-2_7lxzyRc1Z \
+    --group-name students \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --query "Users[*].{Username:Username,Status:UserStatus}"
+
+  aws cognito-idp list-users-in-group \
+    --user-pool-id ap-southeast-2_7lxzyRc1Z \
+    --group-name admin \
+    --profile c3l-analytics \
+    --region ap-southeast-2 \
+    --query "Users[*].{Username:Username,Status:UserStatus}"
+
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 9 — FULL PIPELINE SCRIPT (Automated)
+════════════════════════════════════════════════════════════════════════════════
+
+Save as /tmp/test_pipeline.sh and run: bash /tmp/test_pipeline.sh
+
+--- SCRIPT START ---
+#!/bin/bash
+set -e
+PROFILE="c3l-analytics"
+REGION="ap-southeast-2"
+BACKEND="http://localhost:3001"
+
+echo ""
+echo "========================================="
+echo " c3l-NLI Full Pipeline Test"
+echo "========================================="
+
+echo ""
+echo "[1/6] Testing backend health..."
+curl -sf $BACKEND/api/permissions/ping 2>/dev/null || echo "  -> Backend running"
+
+echo ""
+echo "[2/6] Creating test user permission (whoop)..."
+RESULT=$(curl -sf -X PUT $BACKEND/api/permissions/pipeline-test-001/whoop \
+  -H "Content-Type: application/json" \
+  -d '{"sharing_allowed": true, "data_stage": "raw", "consent_version": "v1.0"}')
+echo "  -> $RESULT"
+
+echo ""
+echo "[3/6] Reading back permission..."
+curl -sf $BACKEND/api/permissions/pipeline-test-001 | python3 -m json.tool
+
+echo ""
+echo "[4/6] Checking S3 bucket for Whoop data..."
+aws s3 ls s3://c3l-nextlevelinsights-data-lake/raw/whoop/ \
+  --recursive --profile $PROFILE --region $REGION | tail -10
+
+echo ""
+echo "[5/6] Scanning DynamoDB DataSyncLogs (last 5)..."
+aws dynamodb scan \
+  --table-name c3l-NextLevelInsights-DataSyncLogs \
+  --profile $PROFILE \
+  --region $REGION \
+  --max-items 5 \
+  --query "Items[*].{type:data_type.S,status:status.S,ts:timestamp.S}" \
+  --output table
+
+echo ""
+echo "[6/6] Checking Glue tables..."
+aws glue get-tables \
+  --database-name c3l_nli_raw_devices \
+  --profile $PROFILE \
+  --region $REGION \
+  --query "TableList[*].{Name:Name,Location:StorageDescriptor.Location}" \
+  --output table
+
+echo ""
+echo "========================================="
+echo " Pipeline test complete."
+echo "========================================="
+--- SCRIPT END ---
+
+
+════════════════════════════════════════════════════════════════════════════════
+QUICK REFERENCE — localStorage Keys (Browser DevTools)
+════════════════════════════════════════════════════════════════════════════════
+
+To inspect or manually set auth state in Chrome/Firefox DevTools:
+  F12 -> Application -> Local Storage -> http://localhost:5173
+
+Key            | Values
+---------------|--------------------------------------------------
+nli_role       | "admin" | "student"
+nli_email      | "any@email.com"
+nli_sub        | "<cognito-sub-uuid or generated string>"
+
+To quickly switch to admin without the auth modal:
+  localStorage.setItem('nli_role', 'admin')
+  localStorage.setItem('nli_email', 'quicktest@uni.edu')
+  localStorage.setItem('nli_sub',  'admin-manual-test-001')
+  location.reload()                         // refresh the page
+
+To switch to student:
+  localStorage.setItem('nli_role', 'student')
+  location.reload()
+
+To log out manually:
+  localStorage.clear()
+  location.reload()
+
+
+════════════════════════════════════════════════════════════════════════════════
+EXPECTED RESULTS SUMMARY
+════════════════════════════════════════════════════════════════════════════════
+
+Test         | PASS Condition
+-------------|------------------------------------------------------------------
+1.1 Sign Up  | JSON file created in backend/data/whoop/signup/
+1.2 Sign In  | Green Student role badge in sidebar, no Admin section
+1.3 Duplicate| HTTP 409 + "already signed up" error message
+2.1 Admin Up | JSON file created in backend/data/whoop/signup/
+2.2 Admin In | Purple Admin badge, Admin Session section in sidebar
+2.3 Role Guard| /admin/dashboard redirects student to /connected-services
+3.1 Whoop    | 6x [S3] Uploaded logs in backend terminal
+3.3 S3 Check | 6 files in s3://c3l-nextlevelinsights-data-lake/raw/whoop/
+3.4 DynamoDB | 6 rows in DataSyncLogs with status=success
+3.5 API read | JSON with recovery_data, sleep_data etc returned
+3.6 Refresh  | New timestamped file + new token saved
+4.1 Perm PUT | {"message":"Permission saved","sharing_allowed":true}
+4.2 Perm GET | Array with the whoop permission row
+5.2 Crawler  | State: READY after ~2 mins
+6.2 DataZone | Sync status: SUCCEED after ~2 mins
+7.1 Lambda   | HTTP 401 (Lambda alive but JWT rejected)
+8.1 Groups   | students + admin groups listed
+8.5 Users    | Users visible in their respective groups
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 10 — ADMIN REAL DATA ENDPOINT
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Verify the backend aggregates real Whoop data and returns it
+         with email column, per-user averages, and data_products list.
+
+PRE-REQUISITE: Backend must be running (node backend/server.js) and at least
+               one Whoop OAuth connect must have been completed (creates files
+               in backend/data/whoop/user_data/).
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 10.1 — Call /api/admin/whoop-summary
+────────────────────────────────────────────────────────────────────────────────
+  curl http://localhost:3001/api/admin/whoop-summary | python3 -m json.tool
+
+  EXPECT structure:
+  {
+    "source": "local_files",
+    "user_count": 1,
+    "sync_files": 3,
+    "rows": [
+      {
+        "owner_id":              "12922709",
+        "email":                 "marko.joksimovic16@gmail.com",
+        "display_name":          "Marko Joksimovic",
+        "avg_recovery_score":    63.6,
+        "avg_sleep_performance": 74.2,
+        "avg_sleep_consistency": 61,
+        "avg_sleep_efficiency":  92.9,
+        "avg_hrv_rmssd":         56,
+        "avg_resting_hr":        61.2,
+        "recovery_records":      63,
+        "sleep_records":         65,
+        ...
+      }
+    ],
+    "data_products": [
+      { "id": "recovery", "label": "Whoop Recovery",
+        "glue_table": "whoop_recovery_recovery",
+        "datazone_product": "c3l-nli_whoop_dev_raw_recovery",
+        "record_count": 63 },
+      ...
+    ]
+  }
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 10.2 — Admin UI shows real data (Manual UI Test)
+────────────────────────────────────────────────────────────────────────────────
+1. Ensure backend + frontend are running
+2. Log in as Admin / Staff
+3. Click "Student Analytics" in sidebar
+   EXPECT (Stats Cards):
+     - Students Connected: 1
+     - Avg Sleep Performance: 74.2
+     - Avg Recovery Score: 63.6
+     - Total Records Synced: 128  (63 recovery + 65 sleep)
+
+4. Check Analytics Table:
+   EXPECT columns: User ID | Email | Display Name | Avg Recovery |
+                   Avg Sleep % | Avg HRV | Avg RHR | Recovery Records |
+                   Sleep Records | Last Synced
+
+   EXPECT row:
+     12922709 | marko.joksimovic16@gmail.com | Marko Joksimovic |
+     [====] 63.6 | [====] 74.2 | 56 | 61.2 | 63 | 65 | 2026-03-04
+
+5. Verify email column is visible and correct
+   EXPECT: marko.joksimovic16@gmail.com shown in blue text
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 10.3 — Data Products Sidebar (Manual UI Test)
+────────────────────────────────────────────────────────────────────────────────
+1. On Admin Dashboard, check the LEFT sidebar panel
+   EXPECT: "Data Sources" header with Database icon
+   EXPECT: "Whoop" group label with red dot
+   EXPECT: 6 product buttons:
+     [Whoop Recovery          63]
+     [Whoop Sleep             65]
+     [Whoop Cycles            75]
+     [Whoop Workout           75]
+     [Whoop Profile            3]
+     [Whoop Body Measurement   3]
+
+2. Click "Whoop Sleep" button
+   EXPECT: Button highlights purple (active state)
+   EXPECT: Detail panel below shows:
+     Glue Table: whoop_sleep_sleep
+     DataZone:   c3l-nli_whoop_dev_raw_sleep
+     S3 Prefix:  raw/whoop/sleep/
+     Records:    65
+
+3. Click same button again to deselect
+   EXPECT: Button returns to default state
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 11 — CSV EXPORT
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Verify CSV download contains all columns including email.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 11.1 — Export CSV via UI
+────────────────────────────────────────────────────────────────────────────────
+1. On Admin Dashboard (logged in as admin, data loaded)
+2. Find and click the "Export CSV" button (top-right of analytics table)
+   EXPECT: File download prompt opens
+   EXPECT: Filename: whoop_analytics_2026-03-04.csv (today's date)
+
+3. Open the downloaded CSV and verify:
+   EXPECTED HEADER ROW:
+   owner_id,email,display_name,avg_recovery_score,avg_sleep_performance,
+   avg_sleep_consistency,avg_sleep_efficiency,avg_hrv_rmssd,avg_resting_hr,
+   recovery_records,sleep_records,cycle_records,workout_records,
+   profile_records,body_records,last_synced
+
+   EXPECTED DATA ROW:
+   "12922709","marko.joksimovic16@gmail.com","Marko Joksimovic",
+   "63.6","74.2","61","92.9","56","61.2","63","65","75","75","3","3",
+   "2026-03-04T04:28:03.613Z"
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 11.2 — CSV disabled when no data
+────────────────────────────────────────────────────────────────────────────────
+1. Clear all user_data files temporarily:
+   mv backend/data/whoop/user_data/ /tmp/whoop_backup/
+   mkdir -p backend/data/whoop/user_data/
+
+2. Reload Admin Dashboard
+   EXPECT: Export CSV button is disabled/greyed out
+   EXPECT: "No Whoop data found" empty state message
+
+3. Restore data:
+   rm -rf backend/data/whoop/user_data/
+   mv /tmp/whoop_backup/ backend/data/whoop/user_data/
+
+════════════════════════════════════════════════════════════════════════════════
+TEST BLOCK 12 — ATHENA QUERY PREVIEW
+════════════════════════════════════════════════════════════════════════════════
+
+PURPOSE: Verify the SQL preview panel updates based on selected data product.
+
+────────────────────────────────────────────────────────────────────────────────
+TEST 12.1 — Default Athena query shows recovery table
+────────────────────────────────────────────────────────────────────────────────
+1. On Admin Dashboard with Recovery selected (default)
+   EXPECT: SQL block in "Athena Query" section shows:
+     FROM   whoop_recovery_recovery
+     WHERE  owner_id IN ('12922709')
+
+2. Click "Whoop Sleep" in sidebar
+   EXPECT: SQL block updates to:
+     FROM   whoop_sleep_sleep
+     WHERE  owner_id IN ('12922709')
+
+3. Verify data source chip:
+   EXPECT: Amber dot + "Local S3 Files (Athena-ready)"
+   (Will show green "Live Athena" when Lambda is deployed)
+
+================================================================================
+EXPECTED RESULTS SUMMARY (Updated 2026-03-04)
+================================================================================
+
+Test         | PASS Condition
+-------------|------------------------------------------------------------------
+10.1 API     | JSON with email, avg_recovery_score 63.6, 6 data_products
+10.2 UI      | Table shows email column with marko.joksimovic16@gmail.com
+10.3 Sidebar | 6 product buttons with real record counts; click shows Glue detail
+11.1 CSV     | Downloaded file has 16 columns including email on row 1
+11.2 Disabled| CSV button greyed out when no user_data files present
+12.1 SQL     | SQL preview shows correct Glue table name per active product
+12.2 Source  | Amber chip "Local S3 Files" showing (green when Lambda live)
+
+================================================================================
+END OF TESTING GUIDE
+================================================================================

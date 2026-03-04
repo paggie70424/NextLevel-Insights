@@ -34,10 +34,10 @@
               <span class="role-icon">🎓</span> 
               Student
             </label>
-            <label class="role-option" :class="{ active: form.role === 'Professional' }">
-              <input type="radio" v-model="form.role" value="Professional">
+            <label class="role-option" :class="{ active: form.role === 'Admin' }">
+              <input type="radio" v-model="form.role" value="Admin">
               <span class="role-icon">💼</span>
-              Professional Staff
+              Admin / Staff
             </label>
           </div>
         </div>
@@ -117,6 +117,7 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
 import SignInWithAppleButton from './SignInWithAppleButton.vue'
+import { useAuth } from '../composables/useAuth'
 
 const props = defineProps({
   initialMode: {
@@ -126,6 +127,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'success'])
+const { login } = useAuth()
 
 const mode = ref(props.initialMode)
 const loading = ref(false)
@@ -178,10 +180,14 @@ const onAppleSignInError = (err) => {
 
 const handleSubmit = async () => {
   if (mode.value === 'signin') {
-      // Simulate Sign In
-      statusMessage.value = `Sign in as ${form.role} successful.`
+      // Map UI role label → internal role key
+      // 'Admin' maps to the 'admin' Cognito group (staff group deleted)
+      const roleKey = form.role === 'Admin' ? 'admin' : 'student'
+      // Update global auth state immediately
+      login(roleKey, form.email)
+      statusMessage.value = `Welcome back! Signed in as ${form.role}.`
       statusType.value = 'success'
-      setTimeout(() => emit('success', { email: form.email, role: form.role }), 1000)
+      setTimeout(() => emit('success', { email: form.email, role: roleKey }), 800)
       return;
   }
 

@@ -1,0 +1,10 @@
+{
+  "role": "Student",
+  "prefix": "Mrs",
+  "firstName": "Jordan",
+  "lastName": "Smith",
+  "gender": "Female",
+  "email": "jordan.smith@uni.edu",
+  "phone": "0400000002",
+  "password": "Admin1234!"
+}

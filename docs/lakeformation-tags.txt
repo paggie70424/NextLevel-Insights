@@ -1,0 +1,172 @@
+================================================================================
+c3l-NLI — LAKE FORMATION TAG (LF-TAG) STRATEGY
+Attribute-Based Access Control for Data Governance
+Region: ap-southeast-2 | Account: 184898280326
+================================================================================
+
+OVERVIEW
+--------
+Lake Formation LF-Tags provide attribute-based access control (ABAC).
+Instead of granting permissions to specific table names, you attach tags to
+data and grant roles access based on those tag values.
+
+This is far superior to hardcoding table names in IAM policies:
+  - New device = tag automatically inherits from database
+  - Role policy never needs to change
+  - Scales to 1,000s of tables with zero policy updates
+
+
+================================================================================
+LF-TAG DEFINITIONS (Create Once)
+================================================================================
+
+Tag Key      Allowed Values
+---------------------------------------------------------------------------
+domain       health | academic | performance | raw | system
+sensitivity  restricted | internal | public
+tier         raw | processed | export
+
+
+================================================================================
+TAG ASSIGNMENTS
+================================================================================
+
+1. Glue Database: c3l_nli_raw_devices
+   Tags:
+     domain       = health (for health tables)
+     domain       = academic (for academic tables)
+     sensitivity  = restricted
+     tier         = processed
+
+2. Glue Tables (health domain):
+   Tables: health_whoop_normalized, health_fitbit_normalized, etc.
+   Tags:
+     domain       = health
+     sensitivity  = restricted
+     tier         = processed
+
+3. Glue Tables (academic domain):
+   Tables: academic_canvas_lms_normalized, academic_moodle_normalized, etc.
+   Tags:
+     domain       = academic
+     sensitivity  = restricted
+     tier         = processed
+
+4. Glue Tables (raw zone):
+   All raw/ tables:
+     domain       = health | academic
+     sensitivity  = restricted
+     tier         = raw
+
+
+================================================================================
+ROLE GRANTS (Policy-Based Access)
+================================================================================
+
+STAFF ROLE (c3l-nli-StaffRole)
+  Grant SELECT where:
+    domain = health AND sensitivity = restricted
+    domain = academic AND sensitivity = restricted
+  Row filter (enforced by UpdateLakeFormationFilter Lambda):
+    student_id IN (consented_student_ids)
+
+ADMIN ROLE (c3l-nli-AdminRole)
+  Grant SELECT where:
+    domain = health AND sensitivity = restricted AND tier = processed
+    domain = academic AND sensitivity = restricted AND tier = processed
+  Row filter: none (admin sees all, but via aggregated Athena VIEW only)
+  Column mask: Consider masking student_id in admin aggregated view
+
+GLUE CRAWLER ROLE (c3l-engageai-glue-crawler-anl)
+  Grant:
+    CREATE_TABLE on database c3l_nli_raw_devices
+    ALL on tables in c3l_nli_raw_devices
+  (This is already configured — see whoop-pipeline-complete.md)
+
+
+================================================================================
+CREATE LF-TAGS (CLI — Run Once)
+================================================================================
+
+aws lakeformation create-lf-tag \
+  --tag-key domain \
+  --tag-values health academic performance raw system \
+  --region ap-southeast-2 --profile c3l-analytics
+
+aws lakeformation create-lf-tag \
+  --tag-key sensitivity \
+  --tag-values restricted internal public \
+  --region ap-southeast-2 --profile c3l-analytics
+
+aws lakeformation create-lf-tag \
+  --tag-key tier \
+  --tag-values raw processed export \
+  --region ap-southeast-2 --profile c3l-analytics
+
+
+================================================================================
+ATTACH TAGS TO DATABASE (CLI)
+================================================================================
+
+aws lakeformation add-lf-tags-to-resource \
+  --resource '{"Database":{"Name":"c3l_nli_raw_devices"}}' \
+  --lf-tags '[{"TagKey":"sensitivity","TagValues":["restricted"]},{"TagKey":"tier","TagValues":["processed"]}]' \
+  --region ap-southeast-2 --profile c3l-analytics
+
+
+================================================================================
+GRANT STAFF ROLE ACCESS (CLI)
+================================================================================
+
+STAFF_ROLE="arn:aws:iam::184898280326:role/c3l-nli-StaffRole"
+
+aws lakeformation grant-permissions \
+  --principal DataLakePrincipalIdentifier="$STAFF_ROLE" \
+  --resource '{"LFTagPolicy":{"ResourceType":"TABLE","Expression":[{"TagKey":"sensitivity","TagValues":["restricted"]},{"TagKey":"tier","TagValues":["processed"]}]}}' \
+  --permissions "SELECT" "DESCRIBE" \
+  --region ap-southeast-2 --profile c3l-analytics
+
+
+================================================================================
+ROW-LEVEL SECURITY: Lake Formation Data Cells Filter
+================================================================================
+
+Managed by Lambda: c3l-nli-UpdateLakeFormationFilter
+
+Filter name format:
+  c3l-nli-staff-filter-<domain>-<device_type>
+  e.g. c3l-nli-staff-filter-health-whoop
+
+Row expression:
+  student_id IN ('abc-uuid-123', 'def-uuid-456', ...)
+
+This filter is:
+  - Created automatically when first student consents
+  - Updated on every new consent (adds student to IN list)
+  - Updated on revoke (removes student from IN list)
+
+Column wildcard: all columns allowed (row filter restricts, not column mask)
+
+
+================================================================================
+LAKE FORMATION vs DATAZONE — CLEAR DIFFERENCE
+================================================================================
+
+Feature              DataZone                Lake Formation
+----------------------------------------------------------
+Business catalog     YES (searchable UI)     NO
+Subscription flow    YES (request access)    NO
+Row-level filtering  NO                      YES (Data Cells Filter)
+Column masking       NO                      YES
+Real enforcement     NO (catalog only)       YES (query engine blocks)
+LF-Tags / ABAC       NO                      YES
+
+Summary:
+  DataZone  = Governance LAYER (discovery, approval, business metadata)
+  LF        = Security ENGINE (what data is actually readable at query time)
+
+Both are needed. DataZone shows what exists and manages approvals.
+Lake Formation enforces who can read which rows at query time.
+
+
+================================================================================

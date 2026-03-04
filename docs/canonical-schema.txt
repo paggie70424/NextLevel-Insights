@@ -1,0 +1,163 @@
+================================================================================
+c3l-NLI — CANONICAL NORMALIZED SCHEMA
+Standard Record Format for All Domains and Devices
+================================================================================
+
+PURPOSE
+-------
+Every device and LMS produces data in a different format. The normalization
+Lambdas (c3l-nli-NormalizeHealth, c3l-nli-NormalizeAcademic) convert ALL raw
+data into this single canonical schema before writing to the processed zone.
+
+This means:
+  - Adding a new device = no schema change needed
+  - Analysts query ONE table structure regardless of device
+  - Time-series analysis works uniformly across all sources
+  - Lake Formation row filters apply the same way to all tables
+
+
+================================================================================
+CANONICAL SCHEMA — 6 FIELDS
+================================================================================
+
+Field             Type       Description
+---------------------------------------------------------------------------
+student_id        string     Student UUID (from Cognito / institution ID)
+device_type       string     Source: whoop | fitbit | oura | canvas_lms | etc.
+metric_type       string     What was measured (see examples below)
+metric_value      double     Numeric value of the measurement
+metric_unit       string     Unit of measurement (see examples below)
+event_timestamp   string     ISO 8601 timestamp when measurement was taken
+
+
+================================================================================
+S3 PARTITION STRUCTURE
+================================================================================
+
+Partitioned by TIME ONLY (not by student — prevents partition explosion):
+
+  processed/
+    domain=health/
+      product=health_metrics/
+        year=YYYY/
+          month=MM/
+            day=DD/
+              <student_id>_<device_type>_normalized.json
+
+  processed/
+    domain=academic/
+      product=academic_engagement/
+        year=YYYY/
+          month=MM/
+            day=DD/
+              <student_id>_<device_type>_normalized.json
+
+Why time-partition only?
+  - Adding 10,000 students does not create new partitions
+  - Date range queries are fast
+  - Glue crawler only needs to track date folders
+  - student_id is a filter IN the data, enforced by Lake Formation row filter
+
+
+================================================================================
+METRIC TYPES — Health Domain
+================================================================================
+
+device_type     metric_type           unit       source
+----------------------------------------------------------------------
+whoop           recovery_score        %          /v2/recovery
+whoop           hrv                   ms         /v2/recovery
+whoop           resting_hr            bpm        /v2/recovery
+whoop           spo2                  %          /v2/recovery
+whoop           skin_temp_celsius     C          /v2/recovery
+whoop           sleep_performance     %          /v2/activity/sleep
+whoop           sleep_efficiency      %          /v2/activity/sleep
+whoop           respiratory_rate      bpm        /v2/activity/sleep
+whoop           total_sleep_ms        ms         /v2/activity/sleep
+whoop           strain                score      /v2/cycle
+whoop           kilojoule             kJ         /v2/cycle
+whoop           avg_heart_rate        bpm        /v2/cycle
+whoop           max_heart_rate        bpm        /v2/cycle
+
+fitbit          resting_hr            bpm        /activities/heart
+fitbit          sleep_efficiency      %          /sleep
+fitbit          total_sleep_min       min        /sleep
+
+oura            readiness_score       score      /daily_readiness
+oura            hrv_balance           score      /daily_readiness
+oura            sleep_score           score      /daily_sleep
+oura            total_sleep_sec       s          /daily_sleep
+
+
+================================================================================
+METRIC TYPES — Academic Domain
+================================================================================
+
+device_type     metric_type           unit       source
+----------------------------------------------------------------------
+canvas_lms      enrolled_courses      count      /courses
+canvas_lms      submissions_count     count      /students/submissions
+canvas_lms      graded_count          count      /students/submissions
+canvas_lms      avg_score             points     /students/submissions
+
+moodle          enrolled_courses      count      core_enrol_get_users_courses
+moodle          grade                 points     gradereport_user_get_grade_items
+
+blackboard      (integration pending)
+
+
+================================================================================
+EXAMPLE NORMALIZED RECORD
+================================================================================
+
+{
+  "student_id":      "abc-uuid-123",
+  "device_type":     "whoop",
+  "metric_type":     "recovery_score",
+  "metric_value":    78.5,
+  "metric_unit":     "%",
+  "event_timestamp": "2026-03-02T08:00:00Z"
+}
+
+{
+  "student_id":      "abc-uuid-123",
+  "device_type":     "canvas_lms",
+  "metric_type":     "avg_score",
+  "metric_value":    87.3,
+  "metric_unit":     "points",
+  "event_timestamp": "2026-03-02T00:00:00Z"
+}
+
+
+================================================================================
+ATHENA QUERY EXAMPLES
+================================================================================
+
+-- Average recovery score per student (admin cohort view)
+SELECT student_id, AVG(metric_value) AS avg_recovery
+FROM "c3l_nli_raw_devices"."health_metrics"
+WHERE metric_type = 'recovery_score'
+  AND year = '2026' AND month = '03'
+GROUP BY student_id;
+
+-- All metrics for a specific student (staff individual view)
+-- Lake Formation row filter automatically limits to consented students
+SELECT metric_type, metric_value, metric_unit, event_timestamp
+FROM "c3l_nli_raw_devices"."health_metrics"
+WHERE student_id = 'abc-uuid-123'
+  AND event_timestamp >= '2026-03-01'
+ORDER BY event_timestamp DESC;
+
+-- Cross-domain correlation (health + academic)
+SELECT h.student_id,
+       h.metric_value AS avg_recovery,
+       a.metric_value AS avg_score
+FROM "c3l_nli_raw_devices"."health_metrics" h
+JOIN "c3l_nli_raw_devices"."academic_engagement" a
+  ON h.student_id = a.student_id
+WHERE h.metric_type = 'recovery_score'
+  AND a.metric_type = 'avg_score'
+  AND h.year = '2026';
+
+
+================================================================================

@@ -1,0 +1,531 @@
+================================================================================
+c3l-NextLevelInsights (NLI) — FRONTEND ARCHITECTURE DOCUMENTATION
+================================================================================
+Updated  : 2026-03-04
+Framework: Vue 3 (Composition API, <script setup>)
+Build    : Vite 5.x
+Router   : vue-router 5.x
+State    : composables (no Pinia/Vuex)
+Icons    : lucide-vue-next
+Port     : http://localhost:5173 (dev)
+================================================================================
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 1 — PROJECT STRUCTURE
+════════════════════════════════════════════════════════════════════════════════
+
+src/
+├── App.vue                   — Root component: layout switcher (MainLayout or empty)
+├── main.js                   — createApp, router plugin, mount
+├── router/
+│   └── index.js              — All routes + beforeEach navigation guard
+├── composables/
+│   └── useAuth.js            — Global auth state: role, email, sub (localStorage)
+├── components/
+│   ├── AuthModal.vue         — Sign In / Sign Up / Forgot Password modal
+│   ├── Header.vue            — Top nav bar: logo, Sign In button, auth state
+│   ├── Sidebar.vue           — Left navigation (role-aware, admin section)
+│   └── SignInWithAppleButton.vue — Apple Sign In button (configured separately)
+├── layouts/
+│   └── MainLayout.vue        — Wraps Sidebar + Header + <router-view>
+└── views/
+    ├── ConnectedServices.vue     — Whoop / Apple / Fitbit / Moodle / Canvas cards
+    ├── AdminDashboard.vue        — Admin-only data analytics + dataframe preview
+    ├── DataPermissions.vue       — Student data sharing toggles
+    ├── DataInsights.vue          — Student personal insights
+    ├── DataRetention.vue         — Student data deletion / retention policies
+    ├── AIChat.vue                — AI assistant chat interface
+    ├── AboutUs.vue               — About the project
+    ├── WhoopConsent.vue          — Whoop data consent page
+    ├── AppleConsent.vue          — Apple Health consent page
+    └── DataResources/
+        ├── WhoopView.vue         — Whoop data resource detail
+        ├── AppleWatchView.vue    — Apple Watch resource detail
+        ├── FitbitView.vue        — Fitbit resource detail
+        ├── MoodleView.vue        — Moodle resource detail
+        └── CanvasView.vue        — Canvas resource detail
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 2 — ROUTING  (src/router/index.js)
+════════════════════════════════════════════════════════════════════════════════
+
+PATH                    | COMPONENT                | GUARD
+------------------------|--------------------------|----------------------------
+/                       | redirect → /connected-   |
+                        | services                 |
+/connected-services     | ConnectedServices.vue    | none
+/data-permissions       | DataPermissions.vue      | none
+/data-insights          | DataInsights.vue         | none
+/about                  | AboutUs.vue              | none
+/data-retention         | DataRetention.vue        | none
+/resources/whoop        | WhoopView.vue            | none
+/resources/apple-health | AppleWatchView.vue       | none
+/resources/fitbit       | FitbitView.vue           | none
+/resources/moodle       | MoodleView.vue           | none
+/resources/canvas       | CanvasView.vue           | none
+/whoop-consent          | WhoopConsent.vue         | empty layout
+/apple-consent          | AppleConsent.vue         | empty layout
+/ai-chat                | AIChat.vue               | none
+/admin/dashboard        | AdminDashboard.vue       | requiresAdmin: true ✅
+
+NAVIGATION GUARD (beforeEach):
+  Checks meta.requiresAdmin = true
+  If (!isLoggedIn || !isAdmin) → redirect to /connected-services
+  This prevents direct URL access to /admin/dashboard by non-admins
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 3 — AUTH COMPOSABLE  (src/composables/useAuth.js)
+════════════════════════════════════════════════════════════════════════════════
+
+Single source of truth for authentication state, shared by ALL components.
+
+STORAGE KEYS (localStorage):
+  nli_role  = "admin" | "student" | null
+  nli_email = "user@email.com"
+  nli_sub   = "<uuid or generated string>"
+
+EXPORTED REFS:
+  userRole  (ref)       — current role string
+  userEmail (ref)       — current email string
+  userSub   (ref)       — current user UUID (used as Athena owner_id)
+
+COMPUTED PROPERTIES:
+  isAdmin   → true when userRole.value === 'admin'
+  isStudent → true when userRole.value === 'student'
+  isLoggedIn→ true when userRole.value is non-null
+
+METHODS:
+  login(role, email)    — sets all 3 localStorage keys + reactive refs
+  logout()              — clears all 3 keys + sets refs to null/''
+
+HOW IT'S USED:
+  Sidebar.vue           → shows/hides Admin section based on isAdmin
+  AdminDashboard.vue    → renders access-denied view if !isAdmin
+  Router guard          → reads isAdmin + isLoggedIn before route entry
+  AuthModal.vue         → calls login() after submit
+  Header.vue            → reads isLoggedIn to show Sign In / Sign Out button
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 4 — AuthModal.vue  (src/components/AuthModal.vue)
+════════════════════════════════════════════════════════════════════════════════
+
+Modes: "signin" | "signup" | "forgot"
+
+ROLE SELECTOR:
+  Displays two toggleable tiles:
+    🎓 Student  → form.role = "Student"
+    💼 Admin / Staff → form.role = "Admin"
+
+SIGN IN (mode = 'signin'):
+  Maps form.role → internal role key:
+    "Admin"   → roleKey = "admin"
+    "Student" → roleKey = "student"
+  Calls: login(roleKey, form.email)
+  Stores to localStorage ONLY — no backend call, no password check
+  Closes modal after 800ms
+
+SIGN UP (mode = 'signup'):
+  Collects: prefix, firstName, lastName, gender, email, phone, password
+  POST http://localhost:3001/api/signup
+  Body: { role, prefix, firstName, lastName, gender, email, phone, password }
+  Success: "Account created! Data saved to S3."  → modal closes after 1500ms
+  Conflict (409): "You have signed up before, please log in."
+
+FORGOT PASSWORD (mode = 'forgot'):
+  POST http://localhost:3001/api/forgot-password
+  Body: { email }
+  Success: "If this email exists, a password reset link has been sent."
+  Not found: "Email not found."
+
+NOTE: Sign-in does NOT currently verify password against any server.
+      It trusts the role the user selects in the UI.
+      Full Cognito integration is the next step.
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 5 — Header.vue  (src/components/Header.vue)
+════════════════════════════════════════════════════════════════════════════════
+
+Top navigation bar, visible on all pages with MainLayout.
+
+Contains:
+  - Site/product name logo
+  - "Sign In" button (when !isLoggedIn) → emits event to open AuthModal
+  - User email display (when isLoggedIn)
+  - "Sign Out" button → calls logout() and reloads page
+
+AuthModal is controlled by Header.vue: it holds showModal ref
+and passes it down to AuthModal.
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 6 — Sidebar.vue  (src/components/Sidebar.vue)
+════════════════════════════════════════════════════════════════════════════════
+
+Fixed left sidebar (width: var(--sidebar-width)).
+
+SECTIONS:
+  ─── My Account ──────────────────────────────────────────────
+  Connected Services       → /connected-services
+  Data Resources (group)   → expands: Whoop / Apple / Fitbit / Moodle / Canvas
+  Data Permissions         → /data-permissions
+  Data Insights            → /data-insights
+  Data Retention           → /data-retention
+  AI Chat                  → /ai-chat
+
+  ─── Admin Session ─── (v-if="isAdmin" — purple, only when admin role)
+  Data Dashboard (group)   → expands: Student Analytics → /admin/dashboard
+
+ROLE BADGE:
+  When logged in, shows a pill badge:
+    Green  = "STUDENT"   (userRole === 'student')
+    Purple = "ADMIN"     (userRole === 'admin')
+
+USER EMAIL:
+  Shown below the role badge; truncated to 130px with text-overflow:ellipsis
+
+ACCORDION:
+  isResourcesOpen (ref) — Data Resources expand/collapse
+  isAdminDashOpen (ref) — Data Dashboard expand/collapse
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 7 — ConnectedServices.vue
+════════════════════════════════════════════════════════════════════════════════
+
+Displays service cards for: Whoop, Apple Health, Fitbit, Moodle, Canvas
+
+WHOOP CARD — FULL INTEGRATION:
+  Connect button: window.location.href = 'http://localhost:3001/api/auth/whoop'
+    → Redirects browser to backend which then redirects to Whoop OAuth
+
+  Callback detection (on mount):
+    if (route.query.status === 'connected' && route.query.service === 'whoop')
+      → sets whoopConnected = true
+      → saves to localStorage so badge persists on refresh
+
+  localStorage key: nli_connected_whoop = "true"
+
+  Disconnect: clears localStorage, sets whoopConnected = false
+
+APPLE HEALTH CARD — PARTIAL INTEGRATION:
+  Connect: GET http://localhost:3001/api/auth/apple (simulated)
+  Returns mock JSON, saves locally
+
+OTHER CARDS (Fitbit, Moodle, Canvas):
+  UI-only — no backend integration yet
+  Show connection status badge (simulated)
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 8 — AdminDashboard.vue
+════════════════════════════════════════════════════════════════════════════════
+
+Route: /admin/dashboard   (meta: { requiresAdmin: true })
+Guard: redirects non-admin to /connected-services
+
+ACCESS DENIED STATE (v-if="!isAdmin"):
+  Shows a card with:
+    - Red ShieldOff icon
+    - "Admin Access Only" heading
+    - Current role display
+    - Back to dashboard button
+
+ADMIN STATE (v-else):
+  Layout: flex row → Products Sidebar (220px fixed) + Main Content (flex 1)
+
+─── PRODUCTS SIDEBAR (left panel) ────────────────────────────
+  Shows 6 Whoop data product buttons sourced from
+  GET /api/admin/whoop-summary → data_products array:
+
+    [Whoop Recovery          63]   ← click to select + load preview
+    [Whoop Sleep             65]
+    [Whoop Cycles            75]
+    [Whoop Workout           75]
+    [Whoop Profile            3]
+    [Whoop Body Measurement   3]
+
+  Active product detail panel shows:
+    Glue Table      : whoop_recovery_recovery
+    DataZone Product: c3l-nli_whoop_dev_raw_recovery
+    S3 Prefix       : raw/whoop/recovery/
+    Records         : 63
+
+─── MAIN CONTENT ─────────────────────────────────────────────
+
+1. AWS Services Strip
+   Cognito → S3 → Glue → DataZone → Athena → Lambda
+   (clickable service badges with colour-coded dots)
+
+2. Stats Cards (4 cards, driven by real data)
+   Students Connected | Avg Sleep Performance | Avg Recovery Score | Total Records
+
+3. Athena SQL Preview
+   Shows the Athena SQL that would be run in production.
+   Glue table name updates when different product tab is active.
+   Source chip: Amber = "Local S3 Files" | Green = "Live Athena"
+
+4. Analytics Results Table
+   Columns: User ID | Email | Display Name | Avg Recovery | Avg Sleep %
+            Avg HRV | Avg RHR | Recovery Records | Sleep Records | Last Synced
+   Email shown in blue (#3b82f6)
+   Recovery/Sleep shown as inline bar + value
+
+   [Export CSV] button → downloads whoop_analytics_YYYY-MM-DD.csv
+   All 16 columns including email
+
+5. DATA PREVIEW — Tabbed Dataframe Section  ← NEW
+   Tabs: one per data product (Recovery | Sleep | Cycles | Workout | Profile | Body)
+   Clicking a tab calls GET /api/admin/whoop-raw/:productId
+
+   SOURCE BAR:
+     Shows the product badge + source filenames + row counts
+     Example: [recovery]  📄 2026-03-04T..._whoop_data.json  63 rows
+
+   DATAFRAME TABLE:
+     Sticky header row with all flattened column names
+     Row number column (#)
+     Max 100 rows, scrollable (max-height: 420px)
+     Columns auto-derived from the data (dot-notation for nested fields):
+       _user_id, _email, cycle_id, sleep_id, user_id, created_at,
+       score_state, score.recovery_score, score.resting_heart_rate,
+       score.hrv_rmssd_milli, score.spo2_percentage, score.skin_temp_celsius
+
+   CELL COLOUR CODING:
+     _email          → blue (#3b82f6), bold
+     _user_id        → grey, monospace
+     numbers         → dark, monospace, right-aligned
+     dates (_at/start/end) → grey, small
+     score_state=SCORED    → green (#16a34a), bold
+     score_state=other     → amber
+     boolean true    → green
+     boolean false   → grey
+
+   [Download recovery.csv] button → exports the raw flattened dataframe
+   Footer shows linked Athena table name
+
+6. Architecture Steps Panel
+   6 numbered steps explaining the full data pipeline
+
+API CALLS MADE BY AdminDashboard.vue:
+  GET  http://localhost:3001/api/admin/whoop-summary   (on mount)
+  GET  http://localhost:3001/api/admin/whoop-raw/:id   (on tab click)
+
+CSV EXPORTS:
+  exportCSV()        → all analytics rows (16 cols) → whoop_analytics_DATE.csv
+  exportPreviewCSV() → raw flattened product rows   → whoop_PRODUCT_DATE.csv
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 9 — DataPermissions.vue
+════════════════════════════════════════════════════════════════════════════════
+
+Route: /data-permissions
+
+Displays toggle cards for each data source (Whoop, Apple, Fitbit, etc.).
+
+For Whoop (when connected):
+  GET  /api/permissions/:userId          — load current permissions
+  PUT  /api/permissions/:userId/whoop    — toggle sharing on/off
+    Body: { sharing_allowed: true|false, data_stage: "processed", consent_version: "v1.0" }
+  Writes to DynamoDB table: c3l-NextLevelInsights-UserDevicePermissions
+
+userId is taken from localStorage.nli_sub
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 10 — DataResources/WhoopView.vue
+════════════════════════════════════════════════════════════════════════════════
+
+Route: /resources/whoop
+
+Displays Whoop data details for the logged-in student:
+  GET  http://localhost:3001/api/whoop/data
+
+Returns the latest session bundle from backend/data/whoop/user_data/*.json:
+  user_profile, body_measurement, recovery_data.records[],
+  sleep_data.records[], cycle_data.records[], workout_data.records[]
+
+Renders cards for each data type with record counts.
+Download button: downloads full JSON as whoop_data.json
+
+REFRESH button:
+  POST http://localhost:3001/api/whoop/refresh
+  Re-fetches from Whoop API using stored refresh_token
+  Saves new session file, new S3 files, new DynamoDB log entries
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 11 — DESIGN SYSTEM  (CSS Variables)
+════════════════════════════════════════════════════════════════════════════════
+
+Defined in src/assets/main.css or App.vue <style>:
+
+Variable              | Value (default)     | Used for
+----------------------|---------------------|--------------------------------
+--c-brand             | #3eaf7c             | Primary green: buttons, links
+--c-brand-light       | lighter green       | Hover states
+--c-text              | #1e1e2e             | Primary text (dark charcoal)
+--c-text-light        | #64748b             | Muted/secondary text
+--c-bg                | #ffffff             | Main background
+--c-bg-light          | #f8fafc             | Section backgrounds
+--c-border            | #e2e8f0             | Card and input borders
+--sidebar-bg          | #ffffff             | Sidebar background
+--sidebar-border      | #e2e8f0             | Sidebar right border
+--sidebar-width       | 240px               | Fixed sidebar width
+
+Admin-specific colours (defined inline in components):
+  #8b5cf6  — Admin purple (badges, active states, step numbers)
+  #7c3aed  — Admin purple dark (text on hover)
+  #3b82f6  — Blue (email column, Athena badge)
+  #f59e0b  — Amber (warning, non-scored states)
+  #16a34a  — Green (SCORED state, boolean true)
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 12 — FULL COMPONENT → BACKEND → AWS MAP
+════════════════════════════════════════════════════════════════════════════════
+
+COMPONENT / ACTION                 → BACKEND ROUTE              → AWS
+-----------------------------------|----------------------------|---------------------
+AuthModal.vue Sign Up              → POST /api/signup           → Local file
+AuthModal.vue Sign In              → (none — localStorage only) → —
+AuthModal.vue Forgot Password      → POST /api/forgot-password  → Local file check
+
+ConnectedServices.vue Connect Whoop→ GET  /api/auth/whoop        → Whoop OAuth (ext)
+ConnectedServices.vue callback     → GET  /api/auth/whoop/       → S3 (6 files upload)
+                                   |     callback               → DynamoDB (sync log)
+ConnectedServices.vue Toggle Perm  → PUT  /api/permissions/      → DynamoDB
+                                   |     :userId/:device         → UserDevicePermissions
+
+DataResources/WhoopView.vue load   → GET  /api/whoop/data        → Local file read
+DataResources/WhoopView.vue refresh→ POST /api/whoop/refresh     → Whoop API (ext)
+                                   |                             → S3 + DynamoDB
+
+DataPermissions.vue load           → GET  /api/permissions/      → DynamoDB read
+                                   |     :userId
+DataPermissions.vue toggle         → PUT  /api/permissions/      → DynamoDB write
+                                   |     :userId/:device
+
+AdminDashboard.vue load summary    → GET  /api/admin/            → Local files
+                                   |     whoop-summary            (→ Athena in prod)
+AdminDashboard.vue preview tab     → GET  /api/admin/            → Local files
+                                   |     whoop-raw/:productId
+AdminDashboard.vue Export CSV      → (browser download - no API) → —
+AdminDashboard.vue Export Raw CSV  → (browser download - no API) → —
+
+Sidebar.vue                        → (reads localStorage only)  → —
+Header.vue                         → (reads localStorage only)  → —
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 13 — ACCOUNT & DATA STORAGE LOCATIONS
+════════════════════════════════════════════════════════════════════════════════
+
+TYPE          | DEV LOCATION                   | PROD LOCATION
+--------------|--------------------------------|------------------------
+Sign-up form  | backend/data/whoop/signup/     | Cognito + DynamoDB
+              | <timestamp>_<email>.json        | c3l-NLI-users table
+Sign-in state | localStorage (browser)          | Cognito JWT token
+Whoop session | backend/data/whoop/user_data/  | AWS S3 only
+              | <timestamp>_whoop_data.json     | (Lambda handles)
+Cognito users | Created via AWS CLI             | ap-southeast-2_7lxzyRc1Z
+              | (Test Block 8 in testing guide) |   user pool
+Permissions   | AWS DynamoDB (live now)         | same
+              | UserDevicePermissions table     |
+Sync logs     | AWS DynamoDB (live now)         | same
+              | DataSyncLogs table              |
+Consent       | AWS DynamoDB (live now)         | same
+              | nextlevel-consent table         |
+
+HOW TO SEE ACCOUNTS:
+  Student signups:
+    ls backend/data/whoop/signup/
+    cat backend/data/whoop/signup/<file>.json
+
+  Current session (who is logged in):
+    Browser DevTools → Application → Local Storage → http://localhost:5173
+    Keys: nli_role, nli_email, nli_sub
+
+  Whoop data (per sync session):
+    ls backend/data/whoop/user_data/
+    cat backend/data/whoop/user_data/<latest>.json | python3 -m json.tool
+
+  DynamoDB (permissions):
+    aws dynamodb scan \
+      --table-name c3l-NextLevelInsights-UserDevicePermissions \
+      --profile c3l-analytics --region ap-southeast-2
+
+  Cognito users in pool:
+    aws cognito-idp list-users \
+      --user-pool-id ap-southeast-2_7lxzyRc1Z \
+      --profile c3l-analytics --region ap-southeast-2
+
+  Cognito group membership:
+    aws cognito-idp list-users-in-group \
+      --user-pool-id ap-southeast-2_7lxzyRc1Z \
+      --group-name students \
+      --profile c3l-analytics --region ap-southeast-2
+
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 14 — ADMIN DASHBOARD DATA PREVIEW: HOW IT WORKS
+════════════════════════════════════════════════════════════════════════════════
+
+1. On mount, AdminDashboard.vue calls:
+   GET /api/admin/whoop-summary
+   → Returns summary rows (1 per user) + data_products list (6 items)
+   → data_products list populates:
+       a) Left sidebar product buttons
+       b) Preview tabs at bottom of page
+   → First product (recovery) auto-selected and preview loaded
+
+2. User clicks a tab (e.g. "Whoop Sleep"):
+   GET /api/admin/whoop-raw/sleep
+   → Backend reads ALL user_data JSON files
+   → Extracts sleep_data.records arrays
+   → Flattens nested objects:
+       { score: { sleep_performance_percentage: 75 } }
+       becomes:
+       { "score.sleep_performance_percentage": 75 }
+   → Prepends _user_id and _email from user_profile
+   → Returns: { columns[], rows[], sources[], total, showing }
+
+3. Frontend renders the dataframe:
+   - Source bar: product name badge + filename chips with row counts
+   - Table: row# column + one column per key in columns[]
+   - Each cell value styled by type (email=blue, number=mono, etc.)
+   - Max 100 rows shown (full data available via CSV download)
+
+4. Download button: exportPreviewCSV()
+   Converts the current previewData.rows to CSV
+   Downloads as: whoop_sleep_2026-03-04.csv
+
+FLATTENED COLUMN NAMES (recovery product example):
+   _user_id, _email, cycle_id, sleep_id, user_id, created_at, updated_at,
+   score_state, score.user_calibrating, score.recovery_score,
+   score.resting_heart_rate, score.hrv_rmssd_milli,
+   score.spo2_percentage, score.skin_temp_celsius
+
+FLATTENED COLUMN NAMES (sleep product example):
+   _user_id, _email, id, cycle_id, user_id, created_at, start, end,
+   timezone_offset, nap, score_state,
+   score.stage_summary.total_in_bed_time_milli,
+   score.stage_summary.total_awake_time_milli,
+   score.stage_summary.total_light_sleep_time_milli,
+   score.stage_summary.total_slow_wave_sleep_time_milli,
+   score.stage_summary.total_rem_sleep_time_milli,
+   score.stage_summary.sleep_cycle_count,
+   score.stage_summary.disturbance_count,
+   score.sleep_needed.baseline_milli, ...,
+   score.respiratory_rate, score.sleep_performance_percentage,
+   score.sleep_consistency_percentage, score.sleep_efficiency_percentage
+
+
+================================================================================
+END OF FRONTEND ARCHITECTURE DOCUMENTATION
+================================================================================

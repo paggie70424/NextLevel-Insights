@@ -1,0 +1,160 @@
+================================================================================
+c3l-NLI — DYNAMODB TABLE: nextlevel-consent
+Schema Reference | Production-Ready Design
+================================================================================
+
+TABLE OVERVIEW
+--------------
+Purpose   : Store student consent decisions at device, metric, and domain level
+Table name: nextlevel-consent
+Region    : ap-southeast-2
+Account   : 184898280326
+
+
+================================================================================
+PRIMARY KEY DESIGN
+================================================================================
+
+Partition Key (PK) : STUDENT#<student_id>
+  e.g.               STUDENT#abc-uuid-123
+
+Sort Key (SK)      : RESOURCE#<domain>#<device_type>
+  e.g.               RESOURCE#health#whoop
+                     RESOURCE#health#fitbit
+                     RESOURCE#academic#canvas_lms
+                     RESOURCE#academic#moodle
+
+
+================================================================================
+ALL ATTRIBUTES
+================================================================================
+
+Attribute           Type     Description
+---------------------------------------------------------------------------
+PK                  S        Partition key: STUDENT#<student_id>
+SK                  S        Sort key: RESOURCE#<domain>#<device_type>
+student_id          S        Student UUID (from Cognito sub or custom:student_id)
+domain              S        Data domain: health | academic | performance
+device_type         S        Source device or LMS (see list below)
+consent_device      BOOL     Student consents to share device-level data
+consent_domain      BOOL     Student consents to share all data in this domain
+consent_metrics     M        Map: per-metric consent flags (see below)
+consented_at        S        ISO 8601 timestamp when consent was given
+expires_at          S        ISO 8601 expiry (null = no expiry)
+status              S        active | revoked | expired
+created_by          S        student_id (audit — who created this record)
+updated_at          S        ISO 8601 last updated timestamp
+
+
+consent_metrics map (health domain example):
+  heart_rate         BOOL
+  sleep              BOOL
+  recovery           BOOL
+  hrv                BOOL
+  strain             BOOL
+  respiratory_rate   BOOL
+  spo2               BOOL
+
+consent_metrics map (academic domain example):
+  grades             BOOL
+  login_count        BOOL
+  submission_count   BOOL
+  discussion_posts   BOOL
+  assignment_scores  BOOL
+
+
+================================================================================
+EXAMPLE ITEMS
+================================================================================
+
+Example 1: Student shared Whoop health data
+{
+  "PK":              "STUDENT#abc-uuid-123",
+  "SK":              "RESOURCE#health#whoop",
+  "student_id":      "abc-uuid-123",
+  "domain":          "health",
+  "device_type":     "whoop",
+  "consent_device":  true,
+  "consent_domain":  true,
+  "consent_metrics": {
+    "heart_rate": true,
+    "sleep":      true,
+    "recovery":   true,
+    "hrv":        false,
+    "strain":     true
+  },
+  "consented_at":    "2026-03-03T01:30:00Z",
+  "expires_at":      null,
+  "status":          "active",
+  "created_by":      "abc-uuid-123",
+  "updated_at":      "2026-03-03T01:30:00Z"
+}
+
+Example 2: Student shared Canvas LMS academic data
+{
+  "PK":              "STUDENT#abc-uuid-123",
+  "SK":              "RESOURCE#academic#canvas_lms",
+  "student_id":      "abc-uuid-123",
+  "domain":          "academic",
+  "device_type":     "canvas_lms",
+  "consent_device":  true,
+  "consent_domain":  false,
+  "consent_metrics": {
+    "grades":           true,
+    "submission_count": true,
+    "discussion_posts": false
+  },
+  "consented_at":    "2026-03-03T01:30:00Z",
+  "expires_at":      "2027-03-03T01:30:00Z",
+  "status":          "active",
+  "created_by":      "abc-uuid-123",
+  "updated_at":      "2026-03-03T01:30:00Z"
+}
+
+
+================================================================================
+QUERY PATTERNS
+================================================================================
+
+1. Get all consents for one student:
+   PK = STUDENT#<student_id>
+   → returns all SK values
+
+2. Get specific resource consent for student:
+   PK = STUDENT#<student_id>
+   SK = RESOURCE#health#whoop
+
+3. Get all students consenting to a resource (for Lake Formation filter):
+   Requires GSI:
+   Index Name: domain-device-index
+   PK (GSI):   domain
+   SK (GSI):   device_type
+   FilterExpression: status = 'active'
+
+
+================================================================================
+GLOBAL SECONDARY INDEX (GSI) — Required for UpdateLakeFormationFilter
+================================================================================
+
+Index Name    : domain-device-index
+Partition Key : domain       (e.g. health)
+Sort Key      : device_type  (e.g. whoop)
+Projection    : student_id, status, consent_metrics
+
+Purpose: Query "which students have consented for domain=health device_type=whoop?"
+         Used by c3l-nli-UpdateLakeFormationFilter to build row filter expression.
+
+
+================================================================================
+CONSENT REVOCATION (FUTURE)
+================================================================================
+
+To revoke: Update status = 'revoked' on the item.
+Lambda c3l-nli-RevokeConsent (future):
+  1. Update item status -> revoked
+  2. Re-run c3l-nli-UpdateLakeFormationFilter → removes student from row filter
+  3. Student data becomes invisible to staff immediately via LF filter
+  (Data remains in S3 for audit unless explicit delete requested)
+
+
+================================================================================

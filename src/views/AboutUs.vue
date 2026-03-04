@@ -1,15 +1,15 @@
 <template>
   <div class="about-us">
     <div class="page-header">
-      <h1 class="page-title">About LifeMetrix</h1>
+      <h1 class="page-title">About NextLevel Insights</h1>
       <p class="page-subtitle">Unified student wellbeing and academic analytics platform.</p>
     </div>
 
-    <!-- 1. What is LifeMetrix -->
+    <!-- 1. What is NextLevel Insights -->
     <div class="content-section">
-      <h2>What is LifeMetrix?</h2>
+      <h2>What is NextLevel Insights?</h2>
       <p>
-        LifeMetrix is a unified student wellbeing and academic analytics platform that integrates data from multiple sources into one secure, student-controlled system. It provides insights to help students manage their wellbeing and academic success, while enabling educators to provide timely, informed support.
+        NextLevel Insights is a unified student wellbeing and academic analytics platform that integrates data from multiple sources into one secure, student-controlled system. It provides insights to help students manage their wellbeing and academic success, while enabling educators to provide timely, informed support.
       </p>
       <div class="integration-list">
         <div class="integration-item">📚 Learning systems (Moodle, Canvas)</div>
@@ -22,7 +22,7 @@
     <!-- 2. Core Principle -->
     <div class="content-section highlight-section">
       <h2>Core Principle: Student-Controlled Data Ownership</h2>
-      <p>LifeMetrix is built on explicit consent and permission control. Students have full authority over their data:</p>
+      <p>NextLevel Insights is built on explicit consent and permission control. Students have full authority over their data:</p>
       <ul class="feature-list">
         <li><strong>Own their data</strong></li>
         <li><strong>Choose what to share</strong></li>
@@ -56,11 +56,11 @@
           </div>
         </div>
 
-        <!-- Professional Card -->
-        <div class="audience-card staff-card">
+        <!-- Admin Card -->
+        <div class="audience-card admin-card">
           <div class="card-header">
             <span class="icon">💼</span>
-            <h3>For Professional Staff</h3>
+            <h3>For Admin / Staff</h3>
           </div>
           <div class="card-body">
             <h4>Purpose</h4>
@@ -80,7 +80,7 @@
     <!-- 4. Permission Model -->
     <div class="content-section">
       <h2>Permission & Privacy Model</h2>
-      <p>LifeMetrix uses granular permission control. Students can toggle access for each data type independently.</p>
+      <p>NextLevel Insights uses granular permission control. Students can toggle access for each data type independently.</p>
       
       <div class="permission-table-container">
         <table class="permission-table">
@@ -131,7 +131,7 @@
       <div class="architecture-visual">
         <div class="arch-box">Single Platform</div>
         <div class="arch-arrow">➡</div>
-        <div class="arch-box">Login (Student / Staff)</div>
+        <div class="arch-box">Login (Student / Admin)</div>
         <div class="arch-arrow">➡</div>
         <div class="arch-box">Role-Specific Dashboard</div>
       </div>
@@ -270,7 +270,7 @@
   background: linear-gradient(135deg, #e0f2f1, #b2dfdb);
 }
 
-.staff-card .card-header {
+.admin-card .card-header {
   background: linear-gradient(135deg, #f3e5f5, #e1bee7);
 }
 
